@@ -104,7 +104,8 @@ class ProfileDisplaynameRestServlet(RestServlet):
             )
 
         # Forbidding Display Name change
-        if allowed is not None and allowed.lower() == "false":
+        # if allowed is not None and allowed.lower() == "false":
+        if allowed is not None:
             raise SynapseError(
                 403,
                 "User is forbidden to change Display Name",
