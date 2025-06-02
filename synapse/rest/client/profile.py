@@ -23,7 +23,7 @@
 
 import re
 from http import HTTPStatus
-from typing import TYPE_CHECKING, Tuple
+from typing import TYPE_CHECKING, Tuple, Optional
 
 from synapse.api.constants import ProfileFields
 from synapse.api.errors import Codes, SynapseError
@@ -58,7 +58,10 @@ def _read_propagate(hs: "HomeServer", request: SynapseRequest) -> bool:
 
 
 class ProfileDisplaynameRestServlet(RestServlet):
-    PATTERNS = client_patterns("/profile/(?P<user_id>[^/]*)/displayname", v1=True)
+    PATTERNS = client_patterns(
+        r"/profile/(?P<user_id>[^/]*)/displayname(?:/(?P<allowed>true|false))?",
+        v1=True
+    )
     CATEGORY = "Event sending requests"
 
     def __init__(self, hs: "HomeServer"):
@@ -93,11 +96,19 @@ class ProfileDisplaynameRestServlet(RestServlet):
         return 200, ret
 
     async def on_PUT(
-        self, request: SynapseRequest, user_id: str
+        self, request: SynapseRequest, user_id: str, allowed: Optional[str] = None
     ) -> Tuple[int, JsonDict]:
         if not UserID.is_valid(user_id):
             raise SynapseError(
                 HTTPStatus.BAD_REQUEST, "Invalid user id", Codes.INVALID_PARAM
+            )
+
+        # Forbidding Display Name change
+        if allowed is not None and allowed.lower() == "false":
+            raise SynapseError(
+                403,
+                "User is forbidden to change Display Name",
+                errcode="M_DISPLAYNAME_CHANGE_FORBIDDEN"
             )
 
         requester = await self.auth.get_user_by_req(request, allow_guest=True)
@@ -136,7 +147,10 @@ class ProfileDisplaynameRestServlet(RestServlet):
 
 
 class ProfileAvatarURLRestServlet(RestServlet):
-    PATTERNS = client_patterns("/profile/(?P<user_id>[^/]*)/avatar_url", v1=True)
+    PATTERNS = client_patterns(
+        r"/profile/(?P<user_id>[^/]*)/avatar_url(?:/(?P<allowed>true|false))?",
+        v1=True
+    )
     CATEGORY = "Event sending requests"
 
     def __init__(self, hs: "HomeServer"):
@@ -171,11 +185,18 @@ class ProfileAvatarURLRestServlet(RestServlet):
         return 200, ret
 
     async def on_PUT(
-        self, request: SynapseRequest, user_id: str
+        self, request: SynapseRequest, user_id: str, allowed: Optional[str] = None
     ) -> Tuple[int, JsonDict]:
         if not UserID.is_valid(user_id):
             raise SynapseError(
                 HTTPStatus.BAD_REQUEST, "Invalid user id", Codes.INVALID_PARAM
+            )
+        # Forbidding avatar change
+        if allowed is not None and allowed.lower() == "false":
+            raise SynapseError(
+                403,
+                "User is forbidden to change avatar",
+                errcode="M_AVATAR_CHANGE_FORBIDDEN"
             )
 
         requester = await self.auth.get_user_by_req(request)
