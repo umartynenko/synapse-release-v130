@@ -22,8 +22,9 @@
 """This module contains REST servlets to do with profile: /profile/<paths>"""
 
 import re
+import logging
 from http import HTTPStatus
-from typing import TYPE_CHECKING, Tuple
+from typing import TYPE_CHECKING, Tuple, Dict
 
 from synapse.api.constants import ProfileFields
 from synapse.api.errors import Codes, SynapseError
@@ -42,6 +43,7 @@ from synapse.util.stringutils import is_namedspaced_grammar
 if TYPE_CHECKING:
     from synapse.server import HomeServer
 
+logger = logging.getLogger(__name__)
 
 def _read_propagate(hs: "HomeServer", request: SynapseRequest) -> bool:
     # This will always be set by the time Twisted calls us.
@@ -66,6 +68,47 @@ class ProfileDisplaynameRestServlet(RestServlet):
         self.hs = hs
         self.profile_handler = hs.get_profile_handler()
         self.auth = hs.get_auth()
+
+    async def _get_user_role(self, user_id: str) -> str:
+        """Получает роль пользователя через хранилище ролей"""
+        try:
+            # Детально логируем проверку наличия модуля
+            if hasattr(self.hs, 'role_module'):
+                logger.info("RoleModule found in self.hs for user: %s", user_id)
+                if hasattr(self.hs.role_module, 'store'):
+                    logger.info("RoleStore found in RoleModule for user: %s", user_id)
+                    role_store = self.hs.role_module.store
+                    role = await role_store.get_user_role(user_id)
+                    logger.info("Retrieved role for %s: %s", user_id, role)
+                    return role
+                else:
+                    logger.warning("RoleModule has no 'store' attribute for user: %s",
+                                   user_id)
+            else:
+                logger.warning("No RoleModule found in self.hs for user: %s", user_id)
+            return "unknown"
+        except Exception as e:
+            logger.error("Error getting user role for %s: %s", user_id, e,
+                         exc_info=True)
+            return "error"
+
+    async def _get_user_permissions(self, user_id: str) -> Dict[str, bool]:
+        """Получает разрешения пользователя через хранилище ролей"""
+        try:
+            if hasattr(self.hs, 'role_module') and hasattr(self.hs.role_module,
+                                                           'store'):
+                role_store = self.hs.role_module.store
+                return await role_store.get_user_permissions(user_id)
+
+            # Возвращаем разрешения по умолчанию, если модуль недоступен
+            logger.warning("RoleModule not available, using default permissions")
+            return {
+                "change_displayname": True,
+                # Другие разрешения по умолчанию
+            }
+        except Exception as e:
+            logger.error("Error getting user permissions: %s", e, exc_info=True)
+            return {"change_displayname": True}  # Разрешаем по умолчанию при ошибке
 
     async def on_GET(
         self, request: SynapseRequest, user_id: str
@@ -103,6 +146,40 @@ class ProfileDisplaynameRestServlet(RestServlet):
         requester = await self.auth.get_user_by_req(request, allow_guest=True)
         user = UserID.from_string(user_id)
         is_admin = await self.auth.is_server_admin(requester)
+
+        # Исправлено с get_user_role на _get_user_role
+        requester_role = await self._get_user_role(requester.user.to_string())
+        requester_id = requester.user.to_string()
+        permissions = await self._get_user_permissions(requester.user.to_string())
+
+        # Логируем запрос
+        logger.info(
+            "PUT displayname request from user: %s (role: %s) for target: %s",
+            requester.user.to_string(),
+            requester_role,
+            user_id
+        )
+
+        # Логируем все права пользователя
+        logger.info(
+            "User %s permissions: %s",
+            requester_id,
+            ", ".join([f"{k}={v}" for k, v in permissions.items()])
+        )
+
+        # Проверяем конкретное разрешение
+        if "change_displayname" in permissions and permissions[
+            "change_displayname"] is False:
+            logger.warning(
+                "User %s does not have permission to edit display name. Permissions: %s",
+                requester_id,
+                ", ".join([f"{k}={v}" for k, v in permissions.items()])
+            )
+            raise SynapseError(
+                403,
+                "You do not have permission to edit display name",
+                errcode=Codes.FORBIDDEN,
+            )
 
         content = parse_json_object_from_request(request)
 
