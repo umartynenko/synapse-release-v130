@@ -22,6 +22,7 @@
 """This module contains REST servlets to do with profile: /profile/<paths>"""
 
 import re
+import logging
 from http import HTTPStatus
 from typing import TYPE_CHECKING, Tuple, Optional
 
@@ -39,9 +40,15 @@ from synapse.rest.client._base import client_patterns
 from synapse.types import JsonDict, JsonValue, UserID
 from synapse.util.stringutils import is_namedspaced_grammar
 
+try:
+    from role_management.role_store import RoleStore
+except ImportError:
+    from .role_management.role_store import RoleStore
+
 if TYPE_CHECKING:
     from synapse.server import HomeServer
 
+logger = logging.getLogger(__name__)
 
 def _read_propagate(hs: "HomeServer", request: SynapseRequest) -> bool:
     # This will always be set by the time Twisted calls us.
@@ -69,6 +76,15 @@ class ProfileDisplaynameRestServlet(RestServlet):
         self.hs = hs
         self.profile_handler = hs.get_profile_handler()
         self.auth = hs.get_auth()
+
+        # Инициализация RoleStore
+        self.role_store = None
+        try:
+            module_api = hs.get_module_api()
+            self.role_store = module_api.get_shared(RoleStore)
+            logger.info("RoleStore initialized successfully for ProfileDisplayname")
+        except Exception as e:
+            logger.error("Failed to initialize RoleStore: %s", e)
 
     async def on_GET(
         self, request: SynapseRequest, user_id: str
@@ -103,18 +119,31 @@ class ProfileDisplaynameRestServlet(RestServlet):
                 HTTPStatus.BAD_REQUEST, "Invalid user id", Codes.INVALID_PARAM
             )
 
-        # Forbidding Display Name change
-        # if allowed is not None and allowed.lower() == "false":
-        if allowed is None:
-            raise SynapseError(
-                403,
-                "User is forbidden to change Display Name",
-                errcode="M_DISPLAYNAME_CHANGE_FORBIDDEN"
-            )
-
         requester = await self.auth.get_user_by_req(request, allow_guest=True)
+        requester_user_id = requester.user.to_string()
         user = UserID.from_string(user_id)
         is_admin = await self.auth.is_server_admin(requester)
+
+        # Проверка разрешения через RoleStore
+        if not is_admin and self.role_store:
+            try:
+                permissions = await self.role_store.get_user_permissions(
+                    requester_user_id)
+                if not permissions.get("change_displayname", False):
+                    raise SynapseError(
+                        403,
+                        "You don't have permission to change display names",
+                        errcode=Codes.FORBIDDEN
+                    )
+            except SynapseError as e:
+                raise e
+            except Exception as e:
+                logger.error("Error checking permissions: %s", e)
+                raise SynapseError(
+                    500,
+                    "Internal server error while checking permissions",
+                    errcode=Codes.UNKNOWN
+                )
 
         content = parse_json_object_from_request(request)
 
@@ -129,7 +158,7 @@ class ProfileDisplaynameRestServlet(RestServlet):
 
         requester_suspended = (
             await self.hs.get_datastores().main.get_user_suspended_status(
-                requester.user.to_string()
+                requester_user_id
             )
         )
 
