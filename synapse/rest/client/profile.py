@@ -40,11 +40,6 @@ from synapse.rest.client._base import client_patterns
 from synapse.types import JsonDict, JsonValue, UserID
 from synapse.util.stringutils import is_namedspaced_grammar
 
-try:
-    from role_management.role_store import RoleStore
-except ImportError:
-    from .role_management.role_store import RoleStore
-
 if TYPE_CHECKING:
     from synapse.server import HomeServer
 
@@ -76,15 +71,8 @@ class ProfileDisplaynameRestServlet(RestServlet):
         self.hs = hs
         self.profile_handler = hs.get_profile_handler()
         self.auth = hs.get_auth()
-
-        # Инициализация RoleStore
         self.role_store = None
-        try:
-            module_api = hs.get_module_api()
-            self.role_store = module_api.get_shared(RoleStore)
-            logger.info("RoleStore initialized successfully for ProfileDisplayname")
-        except Exception as e:
-            logger.error("Failed to initialize RoleStore: %s", e)
+        logger.info("ProfileDisplaynameRestServlet initialized")
 
     async def on_GET(
         self, request: SynapseRequest, user_id: str
@@ -124,19 +112,27 @@ class ProfileDisplaynameRestServlet(RestServlet):
         user = UserID.from_string(user_id)
         is_admin = await self.auth.is_server_admin(requester)
 
-        # Проверка разрешения через RoleStore
+        # Ленивая инициализация RoleStore
+        if not self.role_store:
+            try:
+                from role_management.role_store import RoleStore
+                module_api = self.hs.get_module_api()
+                self.role_store = module_api.get_shared(RoleStore)
+                logger.info("RoleStore initialized successfully for ProfileDisplayname")
+            except Exception as e:
+                logger.error("Failed to initialize RoleStore: %s", e)
+                self.role_store = None
+
+        # Проверка разрешения
         if not is_admin and self.role_store:
             try:
-                permissions = await self.role_store.get_user_permissions(
-                    requester_user_id)
+                permissions = await self.role_store.get_user_permissions(requester_user_id)
                 if not permissions.get("change_displayname", False):
                     raise SynapseError(
                         403,
                         "You don't have permission to change display names",
                         errcode=Codes.FORBIDDEN
                     )
-            except SynapseError as e:
-                raise e
             except Exception as e:
                 logger.error("Error checking permissions: %s", e)
                 raise SynapseError(
