@@ -24,7 +24,7 @@
 import re
 import logging
 from http import HTTPStatus
-from typing import TYPE_CHECKING, Tuple, Optional
+from typing import TYPE_CHECKING, Tuple, Optional, Dict
 
 from synapse.api.constants import ProfileFields
 from synapse.api.errors import Codes, SynapseError
@@ -66,12 +66,16 @@ class ProfileDisplaynameRestServlet(RestServlet):
     )
     CATEGORY = "Event sending requests"
 
-    def __init__(self, hs: "HomeServer"):
+    def __init__(self, hs: "HomeServer", api: "ModuleApi"):
         super().__init__()
         self.hs = hs
         self.profile_handler = hs.get_profile_handler()
         self.auth = hs.get_auth()
         self.role_store = None
+
+        from synapse.module_api import ModuleApi
+        self.api: ModuleApi = api
+
         logger.info("ProfileDisplaynameRestServlet initialized")
 
     async def on_GET(
@@ -99,6 +103,98 @@ class ProfileDisplaynameRestServlet(RestServlet):
 
         return 200, ret
 
+    async def get_user_role(self, user_id: str) -> str:
+        try:
+            role = await self.api.run_db_interaction("get_user_role",
+                                                     self._get_user_role_txn, user_id)
+            return role or self._DEFAULT_ROLE
+        except Exception as e:
+            logger.error("Error getting role for %s: %s", user_id, e)
+            raise SynapseError(500, "Failed to get user role",
+                               errcode="M_ROLE_LOOKUP_FAILED") from e
+
+    def _get_user_role_txn(self, txn, user_id: str) -> Optional[str]:
+        txn.execute(f"SELECT role FROM {self._TABLE_NAME} WHERE user_id = %s",
+                    (user_id,))
+        result = txn.fetchone()
+        return result[0] if result else None
+
+    async def get_user_permissions(self, user_id: str) -> Dict[str, bool]:
+        role = await self.get_user_role(user_id)
+        permissions = {
+            "create_room": False,
+            "manage_users": False,
+            "moderate_content": False,
+            "invite_users": False,
+            "ban_users": False,
+            "can_delete_messages": False,
+            "change_roles": False,
+            "change_displayname": False,  # Новое разрешение
+            "change_avatar": False,  # Для будущего использования
+        }
+
+        # Настройка прав для ролей
+        if role == "admin":
+            permissions.update({
+                "create_room": True,
+                "manage_users": True,
+                "moderate_content": True,
+                "invite_users": True,
+                "ban_users": True,
+                "can_delete_messages": True,
+                "change_roles": True,
+                "change_displayname": True,
+            })
+        elif role == "org_admin":
+            permissions.update({
+                "create_room": True,
+                "manage_users": True,
+                "moderate_content": True,
+                "invite_users": True,
+                "can_delete_messages": True,
+                "change_roles": True,
+                "change_displayname": True,
+            })
+        elif role == "space_leader":
+            permissions.update({
+                "create_room": True,
+                "moderate_content": True,
+                "invite_users": True,
+                "can_delete_messages": True,
+                "change_displayname": True,
+            })
+        elif role == "space_admin":
+            permissions.update({
+                "moderate_content": True,
+                "invite_users": True,
+                "can_delete_messages": True,
+                "change_displayname": True,
+            })
+        elif role == "vip":
+            permissions.update({
+                "create_room": True,
+                "invite_users": True,
+                "change_displayname": True,
+            })
+        elif role == "moderator":
+            permissions.update({
+                "moderate_content": True,
+                "invite_users": True,
+                "can_delete_messages": True,
+                "change_displayname": True,
+            })
+        elif role == "user":
+            permissions.update({
+                "invite_users": True,
+                "change_displayname": True,
+            })
+        elif role == "subscriber":
+            # По умолчанию все False
+            pass
+
+        logger.debug("Permissions for %s (%s): %s", user_id, role, permissions)
+        return permissions
+
     async def on_PUT(
         self, request: SynapseRequest, user_id: str, allowed: Optional[str] = None
     ) -> Tuple[int, JsonDict]:
@@ -124,9 +220,9 @@ class ProfileDisplaynameRestServlet(RestServlet):
                 self.role_store = None
 
         # Проверка разрешения
-        if not is_admin and self.role_store:
+        # if not is_admin and self.role_store:
             try:
-                permissions = await self.role_store.get_user_permissions(requester_user_id)
+                permissions = await self.get_user_permissions(requester_user_id)
                 if not permissions.get("change_displayname", False):
                     raise SynapseError(
                         403,
