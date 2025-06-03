@@ -559,7 +559,10 @@ class UnstableProfileFieldRestServlet(RestServlet):
 def register_servlets(hs: "HomeServer", http_server: HttpServer) -> None:
     # The specific displayname / avatar URL / custom field endpoints *must* appear
     # before their corresponding generic profile endpoint.
-    ProfileDisplaynameRestServlet(hs).register(http_server)
+    module_api = hs.get_module_api()  # <--- ДОБАВЬТЕ ЭТУ СТРОКУ
+
+    ProfileDisplaynameRestServlet(hs, module_api).register(http_server)
+    # ProfileDisplaynameRestServlet(hs).register(http_server)
     ProfileAvatarURLRestServlet(hs).register(http_server)
     ProfileRestServlet(hs).register(http_server)
     if hs.config.experimental.msc4133_enabled:
