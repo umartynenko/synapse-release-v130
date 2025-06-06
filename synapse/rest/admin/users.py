@@ -18,12 +18,13 @@
 # [This file includes modifications made by New Vector Limited]
 #
 #
+import asyncio
 import hashlib
 import hmac
 import logging
 import secrets
 from http import HTTPStatus
-from typing import TYPE_CHECKING, Dict, List, Optional, Tuple, Union
+from typing import TYPE_CHECKING, Coroutine, Dict, List, Optional, Tuple, Union
 
 import attr
 
@@ -52,10 +53,10 @@ from synapse.storage.databases.main.registration import ExternalIDReuseException
 from synapse.storage.databases.main.stats import UserSortOrder
 from synapse.types import JsonDict, JsonMapping, TaskStatus, UserID
 from synapse.types.rest import RequestBodyModel
+from synapse.util.roles_and_permissions import get_user_role
 
 if TYPE_CHECKING:
     from synapse.server import HomeServer
-
 
 logger = logging.getLogger(__name__)
 
@@ -85,6 +86,7 @@ class UsersRestServletV2(RestServlet):
     """
 
     def __init__(self, hs: "HomeServer"):
+        self.hs = hs
         self.store = hs.get_datastores().main
         self.auth = hs.get_auth()
         self.admin_handler = hs.get_admin_handler()
@@ -160,14 +162,28 @@ class UsersRestServletV2(RestServlet):
             locked,
         )
 
-        # If support for MSC3866 is not enabled, don't show the approval flag.
-        filter = None
-        if not self._msc3866_enabled:
+        # Create a list of async tasks to get roles for each user
+        tasks: List[Coroutine] = [get_user_role(self.hs, u.id) for u in users]
+        # Execute all tasks in parallel for efficiency
+        user_roles = await asyncio.gather(*tasks)
 
-            def _filter(a: attr.Attribute) -> bool:
+        # If support for MSC3866 is not enabled, don't show the approval flag.
+        filter_func = None
+        if not self._msc3866_enabled:
+            def _filter(a: attr.Attribute, v) -> bool:
                 return a.name != "approved"
 
-        ret = {"users": [attr.asdict(u, filter=filter) for u in users], "total": total}
+            filter_func = _filter
+
+        # Convert users to dicts and add the custom role
+        users_as_dicts = []
+        for i, user_obj in enumerate(users):
+            user_dict = attr.asdict(user_obj, filter=filter_func)
+            user_dict["custom_role"] = user_roles[i]
+            users_as_dicts.append(user_dict)
+
+        ret = {"users": users_as_dicts, "total": total}
+
         if (start + limit) < total:
             ret["next_token"] = str(start + len(users))
 
@@ -243,6 +259,10 @@ class UserRestServletV2(RestServlet):
         user_info_dict = await self.admin_handler.get_user(target_user)
         if not user_info_dict:
             raise NotFoundError("User not found")
+
+        # Get custom role and add it to the response dictionary
+        custom_role = await get_user_role(self.hs, target_user.to_string())
+        user_info_dict["custom_role"] = custom_role
 
         return HTTPStatus.OK, user_info_dict
 
