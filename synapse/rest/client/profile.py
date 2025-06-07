@@ -22,8 +22,9 @@
 """This module contains REST servlets to do with profile: /profile/<paths>"""
 
 import re
+import logging
 from http import HTTPStatus
-from typing import TYPE_CHECKING, Tuple
+from typing import TYPE_CHECKING, Tuple, Dict
 
 from synapse.api.constants import ProfileFields
 from synapse.api.errors import Codes, SynapseError
@@ -38,9 +39,12 @@ from synapse.http.site import SynapseRequest
 from synapse.rest.client._base import client_patterns
 from synapse.types import JsonDict, JsonValue, UserID
 from synapse.util.stringutils import is_namedspaced_grammar
+from synapse.util.roles_and_permissions import get_user_role, get_user_permissions
 
 if TYPE_CHECKING:
     from synapse.server import HomeServer
+
+logger = logging.getLogger(__name__)
 
 
 def _read_propagate(hs: "HomeServer", request: SynapseRequest) -> bool:
@@ -103,6 +107,39 @@ class ProfileDisplaynameRestServlet(RestServlet):
         requester = await self.auth.get_user_by_req(request, allow_guest=True)
         user = UserID.from_string(user_id)
         is_admin = await self.auth.is_server_admin(requester)
+
+        requester_role = await get_user_role(self.hs, requester.user.to_string())
+        requester_id = requester.user.to_string()
+        permissions = await get_user_permissions(self.hs, requester.user.to_string())
+
+        # Logging the request
+        logger.info(
+            "PUT displayname request from user: %s (role: %s) for target: %s",
+            requester.user.to_string(),
+            requester_role,
+            user_id
+        )
+
+        # Logging all user rights
+        logger.info(
+            "User %s permissions: %s",
+            requester_id,
+            ", ".join([f"{k}={v}" for k, v in permissions.items()])
+        )
+
+        # Checking the specific permission
+        if "change_displayname" in permissions and permissions[
+            "change_displayname"] is False:
+            logger.warning(
+                "User %s does not have permission to edit display name. Permissions: %s",
+                requester_id,
+                ", ".join([f"{k}={v}" for k, v in permissions.items()])
+            )
+            raise SynapseError(
+                403,
+                "You do not have permission to edit display name",
+                errcode=Codes.FORBIDDEN,
+            )
 
         content = parse_json_object_from_request(request)
 
@@ -181,6 +218,37 @@ class ProfileAvatarURLRestServlet(RestServlet):
         requester = await self.auth.get_user_by_req(request)
         user = UserID.from_string(user_id)
         is_admin = await self.auth.is_server_admin(requester)
+
+        # Obtaining user role and permissions
+        requester_id = requester.user.to_string()
+        requester_role = await get_user_role(self.hs, requester_id)
+        permissions = await get_user_permissions(self.hs, requester_id)
+
+        # Logging the request
+        logger.info(
+            "PUT avatar_url request from user: %s (role: %s) for target: %s",
+            requester_id,
+            requester_role,
+            user_id
+        )
+
+        logger.info(
+            "User %s permissions: %s",
+            requester_id,
+            ", ".join([f"{k}={v}" for k, v in permissions.items()])
+        )
+
+        if "change_avatar" in permissions and permissions["change_avatar"] is False:
+            logger.warning(
+                "User %s does not have permission to change avatar URL. Permissions: %s",
+                requester_id,
+                ", ".join([f"{k}={v}" for k, v in permissions.items()])
+            )
+            raise SynapseError(
+                403,
+                "You do not have permission to change avatar",
+                errcode=Codes.FORBIDDEN,
+            )
 
         content = parse_json_object_from_request(request)
         try:
