@@ -53,6 +53,13 @@ from synapse.storage.databases.main.stats import UserSortOrder
 from synapse.types import JsonDict, JsonMapping, TaskStatus, UserID
 from synapse.types.rest import RequestBodyModel
 
+try:
+    from synapse.util.roles_and_permissions import get_user_role
+except ImportError:
+    # Заглушка, если модуль не найден, чтобы Synapse не падал
+    async def get_user_role(hs, user_id: str) -> str:
+        return "module_not_found"
+
 if TYPE_CHECKING:
     from synapse.server import HomeServer
 
@@ -85,6 +92,7 @@ class UsersRestServletV2(RestServlet):
     """
 
     def __init__(self, hs: "HomeServer"):
+        self.hs = hs
         self.store = hs.get_datastores().main
         self.auth = hs.get_auth()
         self.admin_handler = hs.get_admin_handler()
@@ -167,7 +175,22 @@ class UsersRestServletV2(RestServlet):
             def _filter(a: attr.Attribute) -> bool:
                 return a.name != "approved"
 
-        ret = {"users": [attr.asdict(u, filter=filter) for u in users], "total": total}
+        # ret = {"users": [attr.asdict(u, filter=filter) for u in users], "total": total}
+
+        # Новый код:
+        user_dicts = []
+        for u in users:
+            user_dict = attr.asdict(u, filter=filter)
+            # Асинхронно получаем кастомную роль для пользователя
+            # u.name содержит user_id, например, '@user:server.com'
+            custom_role = await get_user_role(self.hs, u.name)
+            # Добавляем новое поле в словарь пользователя
+            user_dict["custom_role"] = custom_role
+            user_dicts.append(user_dict)
+
+        ret = {"users": user_dicts, "total": total}
+
+
         if (start + limit) < total:
             ret["next_token"] = str(start + len(users))
 
@@ -433,6 +456,37 @@ class UserRestServletV2(RestServlet):
             if "user_type" in body:
                 await self.store.set_user_type(target_user, user_type)
 
+                custom_role = body.get("custom_role")
+                if custom_role is not None:
+                    # Проверяем, что модуль ролей загружен и доступен
+                    if hasattr(self.hs, "role_module") and hasattr(self.hs.role_module,
+                                                                   "store"):
+                        try:
+                            # Вызываем метод вашего модуля для установки роли
+                            await self.hs.role_module.store.set_user_role(
+                                user_id, custom_role
+                            )
+                        except SynapseError as e:
+                            # Если ваш модуль вернул ошибку (например, неверная роль),
+                            # пробрасываем ее клиенту
+                            raise e
+                        except Exception as e:
+                            logger.error(
+                                "Failed to set custom role for user %s: %s",
+                                user_id,
+                                e,
+                                exc_info=True,
+                            )
+                            raise SynapseError(
+                                HTTPStatus.INTERNAL_SERVER_ERROR,
+                                "An error occurred while updating the custom role.",
+                            )
+                    else:
+                        logger.warning(
+                            "Attempted to set 'custom_role' for user %s, but the role_module is not loaded. Ignoring.",
+                            user_id,
+                        )
+
             if approved is not None:
                 await self.store.update_user_approval_status(target_user, approved)
 
@@ -461,6 +515,38 @@ class UserRestServletV2(RestServlet):
                 by_admin=True,
                 approved=new_user_approved,
             )
+
+            custom_role = body.get("custom_role")
+            if custom_role is not None:
+                # Проверяем, что модуль ролей загружен и доступен
+                if hasattr(self.hs, "role_module") and hasattr(self.hs.role_module, "store"):
+                    try:
+                        # Устанавливаем роль для только что созданного пользователя
+                        await self.hs.role_module.store.set_user_role(
+                            user_id, custom_role
+                        )
+                    except SynapseError as e:
+                        # Если модуль вернул ошибку, пробрасываем ее.
+                        # Это важно, чтобы администратор знал, что роль не установилась.
+                        raise e
+                    except Exception as e:
+                        logger.error(
+                            "User %s was created, but failed to set custom role: %s",
+                            user_id,
+                            e,
+                            exc_info=True,
+                        )
+                        # Можно либо проигнорировать, либо вернуть ошибку.
+                        # Лучше вернуть ошибку, чтобы UI показал проблему.
+                        raise SynapseError(
+                            HTTPStatus.INTERNAL_SERVER_ERROR,
+                            "User created, but an error occurred while setting the custom role.",
+                        )
+                else:
+                    logger.warning(
+                        "Attempted to set 'custom_role' for new user %s, but the role_module is not loaded. Ignoring.",
+                        user_id,
+                    )
 
             if threepids is not None:
                 current_time = self.hs.get_clock().time_msec()
