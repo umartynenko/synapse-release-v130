@@ -71,10 +71,18 @@ from synapse.util.cancellation import cancellable
 from synapse.util.events import generate_fake_event_id
 from synapse.util.stringutils import parse_and_validate_server_name
 
+logger = logging.getLogger(__name__)
+
+try:
+    from synapse.util.roles_and_permissions import get_user_role, get_user_permissions
+except ImportError:
+    logger.warning(
+        "roles_and_permissions util not found, create_room check will be skipped.")
+    get_user_permissions = None
+    get_user_role = None
+
 if TYPE_CHECKING:
     from synapse.server import HomeServer
-
-logger = logging.getLogger(__name__)
 
 
 class _RoomSize(Enum):
@@ -152,6 +160,7 @@ class RoomCreateRestServlet(TransactionRestServlet):
 
     def __init__(self, hs: "HomeServer"):
         super().__init__(hs)
+        self.hs = hs
         self._room_creation_handler = hs.get_room_creation_handler()
         self.auth = hs.get_auth()
 
@@ -175,6 +184,30 @@ class RoomCreateRestServlet(TransactionRestServlet):
     async def _do(
         self, request: SynapseRequest, requester: Requester
     ) -> Tuple[int, JsonDict]:
+        # Проверяем, что наши функции были успешно импортированы
+        if get_user_permissions:
+            # Получаем права пользователя
+            user_permissions = await get_user_permissions(self.hs,
+                                                          requester.user.to_string())
+
+            # Проверяем разрешение на создание комнаты
+            if not user_permissions.get("create_room", False):
+                # Для более информативного лога получим и роль
+                user_role = "unknown"
+                if get_user_role:
+                    user_role = await get_user_role(self.hs, requester.user.to_string())
+
+                logger.warning(
+                    "User %s (role: %s) attempt to create a room denied. "
+                    "Permission 'create_room' is false.",
+                    requester.user,
+                    user_role,
+                )
+
+                # Выдаем ошибку, которая прервет выполнение и вернется клиенту
+                raise SynapseError(403, "You do not have permission to create rooms.",
+                                   errcode=Codes.FORBIDDEN)
+
         room_id, _, _ = await self._room_creation_handler.create_room(
             requester, self.get_room_config(request)
         )
@@ -1360,11 +1393,12 @@ class RoomTypingRestServlet(RestServlet):
 
 class RoomAliasListServlet(RestServlet):
     PATTERNS = [
-        re.compile(
-            r"^/_matrix/client/unstable/org\.matrix\.msc2432"
-            r"/rooms/(?P<room_id>[^/]*)/aliases"
-        ),
-    ] + list(client_patterns("/rooms/(?P<room_id>[^/]*)/aliases$", unstable=False))
+                   re.compile(
+                       r"^/_matrix/client/unstable/org\.matrix\.msc2432"
+                       r"/rooms/(?P<room_id>[^/]*)/aliases"
+                   ),
+               ] + list(
+        client_patterns("/rooms/(?P<room_id>[^/]*)/aliases$", unstable=False))
     CATEGORY = "Client API requests"
 
     def __init__(self, hs: "HomeServer"):
