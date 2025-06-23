@@ -1028,6 +1028,7 @@ class RoomCreationHandler:
             logger.info(
                 f"бнаружено создание пространства '{room_id}'. Запускаем создание дочерних комнат.")
 
+
             try:
                 space_name = config.get("name", "Новое пространство")
                 creator_user_id = requester.user.to_string()
