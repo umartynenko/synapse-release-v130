@@ -1023,83 +1023,156 @@ class RoomCreationHandler:
         # Этот блок автоматически создает две дочерние комнаты при создании пространства.
         # Проверяем, является ли созданная комната Пространством (Space)
         # RoomTypes.SPACE это константа для "m.space"
+        # if config.get("creation_content", {}).get(
+        #     EventContentFields.ROOM_TYPE) == RoomTypes.SPACE:
+        #     logger.info(
+        #         f"бнаружено создание пространства '{room_id}'. Запускаем создание дочерних комнат.")
+        #
+        #
+        #     try:
+        #         space_name = config.get("name", "Новое пространство")
+        #         creator_user_id = requester.user.to_string()
+        #
+        #         # --- Функция-помощник для создания дочерней комнаты ---
+        #         async def _create_child_room(name: str, preset: str,
+        #                                      add_invite: bool) -> None:
+        #             """
+        #             Создаёт дочернюю комнату для пространства.
+        #
+        #             Аргументы:
+        #                 name: Имя дочерней комнаты.
+        #                 preset: Пресет для создания комнаты (например, приватная или публичная).
+        #                 add_invite: Если True — пригласить создателя в новую комнату.
+        #
+        #             Создаёт комнату, добавляет при необходимости приглашение для создателя,
+        #             и отправляет событие `m.space.child` в пространство, чтобы связать новую комнату с ним.
+        #             """
+        #             child_room_config = {"preset": preset, "name": name, }
+        #
+        #             if add_invite:
+        #                 # Приглашаем создателя в приватную комнату
+        #                 child_room_config["invite"] = [creator_user_id]
+        #
+        #             # Создаем комнату, используя тот же хендлер
+        #             child_room_id, _, _ = await self.create_room(
+        #                 requester=requester,
+        #                 config=child_room_config,
+        #                 ratelimit=False  # Отключаем рейт-лимит для системных действий
+        #             )
+        #             logger.info(
+        #                 f"Для пространства '{room_id}' создана дочерняя комната '{child_room_id}'")
+        #
+        #             # Делаем новую комнату дочерней для пространства,
+        #             # отправляя state event 'm.space.child' в пространство.
+        #             await self.event_creation_handler.create_and_send_nonmember_event(
+        #                 requester,
+        #                 {
+        #                     "type": EventTypes.SpaceChild,
+        #                     "state_key": child_room_id,
+        #                     "room_id": room_id,  # ID родительского пространства
+        #                     "sender": creator_user_id,
+        #                     "content": {
+        #                         "via": [self.hs.hostname],
+        #                         "suggested": True,
+        #                         # Чтобы комната отображалась в списке по умолчанию
+        #                     },
+        #                 },
+        #                 ratelimit=False,
+        #             )
+        #             logger.info(
+        #                 f"Комната '{child_room_id}' привязана к пространству '{room_id}'")
+        #
+        #         # Создаем публичный чат
+        #         await _create_child_room(
+        #             name=f"{space_name} - Общий",
+        #             preset=RoomCreationPreset.PUBLIC_CHAT,
+        #             add_invite=False
+        #         )
+        #
+        #         # Создаем приватный чат
+        #         await _create_child_room(
+        #             name=f"{space_name} - Приватный",
+        #             preset=RoomCreationPreset.PRIVATE_CHAT,
+        #             add_invite=False
+        #         )
+        #     except Exception as e:
+        #         # Если что-то пошло не так, мы просто логируем ошибку,
+        #         # но не прерываем создание самого пространства.
+        #         logger.error(
+        #             f"Не удалось автоматически создать дочерние комнаты для пространства '{room_id}': {e}")
         if config.get("creation_content", {}).get(
             EventContentFields.ROOM_TYPE) == RoomTypes.SPACE:
             logger.info(
-                f"бнаружено создание пространства '{room_id}'. Запускаем создание дочерних комнат.")
-
-
+                f"Обнаружено создание пространства '{room_id}'. Запускаем создание дочерних комнат."
+            )
             try:
                 space_name = config.get("name", "Новое пространство")
-                creator_user_id = requester.user.to_string()
 
-                # --- Функция-помощник для создания дочерней комнаты ---
-                async def _create_child_room(name: str, preset: str,
-                                             add_invite: bool) -> None:
-                    """
-                    Создаёт дочернюю комнату для пространства.
+                async def _create_child_room_and_join(name: str, preset: str) -> str:
+                    """Создает дочернюю комнату и возвращает ее ID."""
+                    child_room_config = {
+                        "preset": preset,
+                        "name": name,
+                    }
 
-                    Аргументы:
-                        name: Имя дочерней комнаты.
-                        preset: Пресет для создания комнаты (например, приватная или публичная).
-                        add_invite: Если True — пригласить создателя в новую комнату.
-
-                    Создаёт комнату, добавляет при необходимости приглашение для создателя,
-                    и отправляет событие `m.space.child` в пространство, чтобы связать новую комнату с ним.
-                    """
-                    child_room_config = {"preset": preset, "name": name, }
-
-                    if add_invite:
-                        # Приглашаем создателя в приватную комнату
-                        child_room_config["invite"] = [creator_user_id]
-
-                    # Создаем комнату, используя тот же хендлер
                     child_room_id, _, _ = await self.create_room(
                         requester=requester,
                         config=child_room_config,
-                        ratelimit=False  # Отключаем рейт-лимит для системных действий
+                        ratelimit=False
                     )
+
                     logger.info(
                         f"Для пространства '{room_id}' создана дочерняя комната '{child_room_id}'")
 
-                    # Делаем новую комнату дочерней для пространства,
-                    # отправляя state event 'm.space.child' в пространство.
                     await self.event_creation_handler.create_and_send_nonmember_event(
-                        requester,
-                        {
+                        requester=requester,
+                        event_dict={
                             "type": EventTypes.SpaceChild,
                             "state_key": child_room_id,
-                            "room_id": room_id,  # ID родительского пространства
-                            "sender": creator_user_id,
+                            "room_id": room_id,
+                            "sender": requester.user.to_string(),
                             "content": {
                                 "via": [self.hs.hostname],
                                 "suggested": True,
-                                # Чтобы комната отображалась в списке по умолчанию
                             },
                         },
                         ratelimit=False,
                     )
                     logger.info(
                         f"Комната '{child_room_id}' привязана к пространству '{room_id}'")
+                    return child_room_id
 
-                # Создаем публичный чат
-                await _create_child_room(
+                # Создаем публичный чат. requester автоматически присоединится.
+                await _create_child_room_and_join(
                     name=f"{space_name} - Общий",
                     preset=RoomCreationPreset.PUBLIC_CHAT,
-                    add_invite=False
                 )
 
                 # Создаем приватный чат
-                await _create_child_room(
+                private_chat_id = await _create_child_room_and_join(
                     name=f"{space_name} - Приватный",
                     preset=RoomCreationPreset.PRIVATE_CHAT,
-                    add_invite=False
                 )
+
+                # --- КЛЮЧЕВОЕ ИЗМЕНЕНИЕ ---
+                # Даже если комната была создана с правилом "invite",
+                # мы принудительно заставляем пользователя присоединиться.
+                # `update_membership` справится с этим, изменив состояние с "invite" на "join".
+                # Это действие выполняется от имени самого пользователя (`requester`).
+                await self.room_member_handler.update_membership(
+                    requester=requester,
+                    target=requester.user,
+                    room_id=private_chat_id,
+                    action="join",
+                    ratelimit=False,
+                )
+                logger.info(
+                    f"Пользователь {requester.user} принудительно присоединен к приватной комнате {private_chat_id}")
+
             except Exception as e:
-                # Если что-то пошло не так, мы просто логируем ошибку,
-                # но не прерываем создание самого пространства.
                 logger.error(
-                    f"Не удалось автоматически создать дочерние комнаты для пространства '{room_id}': {e}")
+                    f"Не удалось автоматически создать дочерние комнаты для пространства '{room_id}': {e}"
+                )
 
         return room_id, room_alias, last_stream_id
 

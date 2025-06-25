@@ -54,6 +54,7 @@ from synapse.rest.admin.devices import (
     DevicesGetRestServlet,
     DevicesRestServlet,
 )
+from synapse.rest.admin.create_space_structure import CreateSpaceStructureServlet
 from synapse.rest.admin.event_reports import (
     EventReportDetailRestServlet,
     EventReportsRestServlet,
@@ -336,6 +337,7 @@ def register_servlets(hs: "HomeServer", http_server: HttpServer) -> None:
     ExperimentalFeaturesRestServlet(hs).register(http_server)
     SuspendAccountRestServlet(hs).register(http_server)
     ScheduledTasksRestServlet(hs).register(http_server)
+    CreateSpaceStructureServlet(hs).register(http_server)
 
 
 def register_servlets_for_client_rest_resource(

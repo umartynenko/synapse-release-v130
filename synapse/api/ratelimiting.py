@@ -25,7 +25,7 @@ from typing import Dict, Hashable, Optional, Tuple
 from synapse.api.errors import LimitExceededError
 from synapse.config.ratelimiting import RatelimitSettings
 from synapse.storage.databases.main import DataStore
-from synapse.types import Requester
+from synapse.types import Requester, create_requester
 from synapse.util import Clock
 
 
@@ -145,6 +145,26 @@ class Ratelimiter:
                 * The reactor timestamp for when the action can be performed next.
                   -1 if rate_hz is less than or equal to zero
         """
+
+        if requester:
+            # Проверяем, является ли реальный пользователь (тот, кто аутентифицировался)
+            # администратором сервера.
+
+            # Если есть authenticated_entity, значит это олицетворение.
+            # Берем ID реального пользователя.
+            # Если нет, берем ID из самого requester.
+            auth_user_id = requester.authenticated_entity or requester.user.to_string()
+
+            # Создаем Requester для проверки прав
+            auth_requester = create_requester(auth_user_id)
+
+            # Получаем объект Auth через store
+            auth = self.store.hs.get_auth()
+
+            # Если реальный пользователь - админ, пропускаем ВСЕ лимиты для этого запроса.
+            if await auth.is_server_admin(auth_requester):
+                return True, -1.0
+
         key = self._get_key(requester, key)
 
         if requester:
@@ -336,6 +356,8 @@ class RequestRatelimiter:
         self.store = store
         self.clock = clock
 
+        # self._auth = store.hs.get_auth()
+
         # The rate_hz and burst_count are overridden on a per-user basis
         self.request_ratelimiter = Ratelimiter(
             store=self.store,
@@ -379,6 +401,27 @@ class RequestRatelimiter:
         Raises:
             LimitExceededError if the request should be ratelimited
         """
+        #
+        # # --- НАЧАЛО ИЗМЕНЕНИЙ ---
+        #
+        # # Если запрос выполняется от имени другого пользователя (impersonation),
+        # # проверяем, является ли аутентифицированная сущность администратором.
+        # if requester.authenticated_entity:
+        #     # Создаем "фальшивый" Requester для аутентифицированной сущности,
+        #     # чтобы передать его в is_server_admin.
+        #     auth_requester = create_requester(requester.authenticated_entity)
+        #     if await self._auth.is_server_admin(auth_requester):
+        #         # Если реальный пользователь - админ, то лимиты не применяем,
+        #         # даже если он действует от имени обычного пользователя.
+        #         return
+        #
+        # # Старая проверка: не применять лимиты к самому администратору,
+        # # когда он действует от своего имени.
+        # if await self._auth.is_server_admin(requester):
+        #     return
+        #
+        # # --- КОНЕЦ ИЗМЕНЕНИЙ ---
+
         user_id = requester.user.to_string()
 
         # The AS user itself is never rate limited.
