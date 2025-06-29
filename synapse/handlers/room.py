@@ -1083,13 +1083,13 @@ class RoomCreationHandler:
 
                 # Создаем публичный чат. requester автоматически присоединится.
                 await _create_child_room_and_join(
-                    name=f"{space_name} - Общий",
+                    name=f"{space_name} - ОЧ",
                     preset=RoomCreationPreset.PUBLIC_CHAT,
                 )
 
                 # Создаем приватный чат
                 private_chat_id = await _create_child_room_and_join(
-                    name=f"{space_name} - Приватный",
+                    name=f"{space_name} - ЗЧ",
                     preset=RoomCreationPreset.PRIVATE_CHAT,
                 )
 
