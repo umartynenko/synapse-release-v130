@@ -683,6 +683,65 @@ class RoomMemberHandler(metaclass=abc.ABCMeta):
                             origin_server_ts=origin_server_ts,
                         )
 
+                    # ==================== НАЧАЛО КАСТОМНОГО БЛОКА АВТО-ПРИСОЕДИНЕНИЯ ======================
+
+                    # Мы запускаем авто-присоединение только если предыдущее действие было "invite"
+                    if action == "invite":
+                        try:
+                            # 1. Проверяем, является ли комната приватной (по правилам входа).
+                            #    `context` уже содержит текущее состояние комнаты.
+                            join_rules_event = context.get_current_state(
+                                (EventTypes.JoinRules, "")
+                            )
+
+                            is_private = (
+                                join_rules_event is None
+                                or join_rules_event.content.get(
+                                "join_rule") == JoinRules.INVITE
+                            )
+
+                            # 2. Если комната приватная, автоматически принимаем приглашение.
+                            if is_private:
+                                logger.info(
+                                    "Комната %s приватная. Автоматически принимаем приглашение для %s",
+                                    room_id,
+                                    target.to_string(),
+                                )
+
+                                # 3. Создаем "requester" для приглашенного пользователя.
+                                target_user_id = target.to_string()
+                                target_requester = create_requester(target_user_id)
+
+                                # 4. Вызываем этот же метод `update_membership_locked` рекурсивно,
+                                #    но уже для действия "join".
+                                await self.update_membership_locked(
+                                    requester=target_requester,
+                                    target=target,
+                                    room_id=room_id,
+                                    action="join",
+                                    ratelimit=False,
+                                    # Не применяем рейт-лимиты для системных действий
+                                    require_consent=False,
+                                    # Согласие уже было дано, не запрашиваем снова
+                                )
+                                logger.info(
+                                    "Приглашение для %s в комнату %s принято автоматически.",
+                                    target_user_id,
+                                    room_id,
+                                )
+
+                        except Exception as e:
+                            # Логируем ошибку, но не прерываем основной процесс.
+                            # Если авто-джоин не удался, пользователь просто получит обычный инвайт.
+                            logger.warning(
+                                "Не удалось автоматически принять приглашение для %s в комнату %s: %s",
+                                target.to_string(),
+                                room_id,
+                                e,
+                            )
+
+                    # ===================== КОНЕЦ КАСТОМНОГО БЛОКА =======================
+
         return result
 
     async def update_membership_locked(
@@ -744,6 +803,50 @@ class RoomMemberHandler(metaclass=abc.ABCMeta):
         Returns:
             A tuple of the new event ID and stream ID.
         """
+
+        # ==================== НАЧАЛО КАСТОМНОГО БЛОКА ПРОВЕРКИ ЛИМИТОВ ======================
+
+        # Проверка имеет смысл только при попытке присоединиться (join), быть приглашенным (invite)
+        # или постучаться (knock).
+        if action in (Membership.JOIN, Membership.INVITE, Membership.KNOCK):
+            # 1. Проверяем, есть ли для этой комнаты лимиты в нашей таблице.
+            #    Это самый быстрый способ определить, является ли комната "Группой".
+            limits = await self.store.get_room_limits(room_id)
+
+            if limits and limits.get("max_users") is not None:
+                max_users_limit = limits["max_users"]
+
+                # 2. Получаем текущее количество участников.
+                # @ts-ignore
+                current_member_count = await self.store.get_current_room_membership_count(
+                    room_id)
+
+                logger.info(
+                    "Проверка лимита для группы %s: текущее кол-во %d, лимит %d",
+                    room_id,
+                    current_member_count,
+                    max_users_limit,
+                )
+
+                # 3. Сравниваем с лимитом.
+                #    Если пользователь уже в комнате (например, меняет профиль),
+                #    то его вступление не должно блокироваться.
+                (
+                    current_membership,
+                    _,
+                ) = await self.store.get_local_current_membership_for_user_in_room(
+                    target.to_string(), room_id
+                )
+
+                if current_membership != Membership.JOIN and current_member_count >= max_users_limit:
+                    # 4. Если лимит достигнут и пользователь еще не участник, отклоняем событие.
+                    raise SynapseError(
+                        403,  # Forbidden
+                        f"В этом пространстве достигнут максимальный лимит участников ({max_users_limit}).",
+                        errcode=Codes.FORBIDDEN,
+                    )
+
+        # ===================== КОНЕЦ КАСТОМНОГО БЛОКА ПРОВЕРКИ ЛИМИТОВ =======================
 
         content_specified = bool(content)
         if content is None:
@@ -2342,3 +2445,86 @@ def get_servers_from_users(users: List[str]) -> Set[str]:
         except SynapseError:
             pass
     return servers
+
+
+async def _check_space_limits_recursive(
+    store: "DataStore", room_id: str, new_member_id: str
+) -> None:
+    """
+    Рекурсивно поднимается по иерархии пространств от данной комнаты,
+    проверяя лимиты на каждом уровне.
+    """
+    parent_id = await store.get_parent_space(room_id)
+    if not parent_id:
+        return  # Дошли до вершины, родителей нет
+
+    # Проверяем лимиты у найденного родителя
+    limits = await store.get_room_limits(parent_id)
+    if limits and limits.get("max_users") is not None:
+        max_users_limit = limits["max_users"]
+
+        # Считаем участников в родительском пространстве
+        current_member_count = await store.get_current_room_membership_count(parent_id)
+
+        logger.info(
+            "Проверка лимита родительского пространства %s: текущее кол-во %d, лимит %d",
+            parent_id,
+            current_member_count,
+            max_users_limit,
+        )
+
+        # Проверяем, не является ли новый участник уже членом родительского пространства
+        is_already_member_in_parent = await store.is_host_in_room(
+            new_member_id, parent_id
+        )
+
+        if not is_already_member_in_parent and current_member_count >= max_users_limit:
+            raise SynapseError(
+                403,
+                f"Невозможно присоединиться: в родительском пространстве достигнут лимит участников ({max_users_limit}).",
+                errcode=Codes.FORBIDDEN,
+            )
+
+    # Рекурсивно вызываем для следующего родителя
+    await _check_space_limits_recursive(store, parent_id, new_member_id)
+
+
+async def _check_chat_limits_recursive(store: "DataStore", room_id: str) -> None:
+    """
+    Рекурсивно поднимается по иерархии пространств от данной комнаты,
+    проверяя лимит на количество дочерних комнат (чатов) на каждом уровне.
+    """
+    parent_id = await store.get_parent_space(room_id)
+    if not parent_id:
+        return  # Дошли до вершины, родителей нет
+
+    # Проверяем лимиты у найденного родителя
+    limits = await store.get_room_limits(parent_id)
+    if limits and limits.get("max_chats") is not None:
+        max_chats_limit = limits["max_chats"]
+
+        # Считаем дочерние комнаты у родительского пространства
+        child_events = await store.get_state_for_key(
+            parent_id, EventTypes.SpaceChild
+        )
+        current_chat_count = len(child_events)
+
+        logger.info(
+            "Рекурсивная проверка лимита чатов для пространства %s: текущее кол-во %d, лимит %d",
+            parent_id,
+            current_chat_count,
+            max_chats_limit,
+        )
+
+        # Поскольку эта проверка происходит в момент *добавления* нового чата,
+        # нам нужно проверить, не превысит ли лимит *новое* количество.
+        # Поэтому мы используем `>=`.
+        if current_chat_count >= max_chats_limit:
+            raise SynapseError(
+                403,
+                f"Невозможно добавить чат: в родительском пространстве '{parent_id}' достигнут лимит на количество чатов ({max_chats_limit}).",
+                errcode=Codes.FORBIDDEN,
+            )
+
+    # Рекурсивно вызываем для следующего родителя
+    await _check_chat_limits_recursive(store, parent_id)

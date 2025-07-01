@@ -901,6 +901,26 @@ class RoomCreationHandler:
             room_version=room_version,
         )
 
+        # Получаем кастомные поля из `creation_content`
+        creation_content = config.get("creation_content", {})
+        max_users = creation_content.get("custom.max_users")
+        max_chats = creation_content.get("custom.max_chats")
+
+        # Получаем тип комнаты из корня конфига, как мы его передаем с фронта
+        room_type = config.get("room_type")
+
+        # Если создается "Пространство Группа" и лимиты указаны, записываем их в БД
+        if room_type == "group" and (max_users is not None or max_chats is not None):
+            logger.info(
+                f"Установка лимитов для пространства-группы '{room_id}': "
+                f"max_users={max_users}, max_chats={max_chats}"
+            )
+            await self.hs.get_datastores().main.set_room_limits(
+                room_id=room_id,
+                max_users=max_users,
+                max_chats=max_chats,
+            )
+
         # Check whether this visibility value is blocked by a third party module
         allowed_by_third_party_rules = await (
             self._third_party_event_rules.check_visibility_can_be_modified(
@@ -1039,8 +1059,8 @@ class RoomCreationHandler:
         #    ID добавляются в возвращаемый `room_alias` через разделитель `|`.
         #    Фронтенд-часть (dataProvider) знает об этом и парсит эту строку.
         # ==============================================================================
-        if config.get("creation_content", {}).get(
-            EventContentFields.ROOM_TYPE) == RoomTypes.SPACE:
+        if (creation_content.get(EventContentFields.ROOM_TYPE) == RoomTypes.SPACE
+            and room_type in ["department", "group"]):
             logger.info(
                 f"Обнаружено создание пространства '{room_id}'. Запускаем создание дочерних комнат."
             )

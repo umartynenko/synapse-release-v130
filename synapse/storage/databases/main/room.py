@@ -35,6 +35,7 @@ from typing import (
     Tuple,
     Union,
     cast,
+    Set,
 )
 
 import attr
@@ -1932,6 +1933,17 @@ class RoomWorkerStore(CacheInvalidationWorkerStore):
                 },
                 desc="set_room_is_public_appservice_false",
             )
+
+    async def get_current_room_membership_count(self, room_id: str) -> int:
+        """
+        Эффективно подсчитывает текущее количество участников (join) в комнате.
+        """
+        return await self.db_pool.simple_select_one_onecol(
+            table="room_memberships",
+            keyvalues={"room_id": room_id, "membership": "join"},
+            retcol="COUNT(*)",
+            desc="get_current_room_membership_count",
+        )
 
 
 class _BackgroundUpdates:
