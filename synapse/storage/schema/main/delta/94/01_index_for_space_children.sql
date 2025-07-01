@@ -1,0 +1,1 @@
+CREATE INDEX state_events_type_state_key_idx ON state_events(type, state_key) WHERE NOT deleted;

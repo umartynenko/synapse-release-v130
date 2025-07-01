@@ -2755,3 +2755,28 @@ class RoomStore(RoomBackgroundUpdateStore, RoomWorkerStore):
                 WHERE stream_id <= ?
             """
             txn.execute(sql, (device_lists_stream_id,))
+
+    async def get_parent_spaces_for_room(self, room_id: str) -> List[str]:
+        """Находит ID всех пространств, которые являются непосредственными
+        родителями для данной комнаты.
+
+        Работает путем поиска активных событий 'm.space.child' в таблице
+        текущего состояния (current_state_events).
+
+        Args:
+            room_id: ID дочерней комнаты.
+
+        Returns:
+            Список ID родительских пространств.
+        """
+        # ИЗМЕНЕНИЕ: Используем таблицу current_state_events и убираем
+        # проверку несуществующей колонки "deleted".
+        return await self.db_pool.simple_select_onecol(
+            table="current_state_events",
+            keyvalues={
+                "type": EventTypes.SpaceChild,
+                "state_key": room_id,
+            },
+            retcol="room_id",
+            desc="get_parent_spaces_for_room",
+        )
