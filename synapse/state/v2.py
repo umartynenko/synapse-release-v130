@@ -39,11 +39,13 @@ from typing import (
 )
 
 from synapse import event_auth
-from synapse.api.constants import EventTypes
-from synapse.api.errors import AuthError
+from synapse.api.constants import EventTypes, RoomTypes
+from synapse.api.errors import AuthError,SynapseError, Codes
 from synapse.api.room_versions import RoomVersion
 from synapse.events import EventBase
 from synapse.types import MutableStateMap, StateMap, StrCollection
+from synapse.handlers.room_member import _check_chat_limits_recursive
+
 
 logger = logging.getLogger(__name__)
 
@@ -555,6 +557,53 @@ async def _iterative_auth_checks(
 
     for idx, event_id in enumerate(event_ids, start=1):
         event = event_map[event_id]
+
+        # ==================== НАЧАЛО КАСТОМНОГО БЛОКА ПРОВЕРКИ ЛИМИТА ЧАТОВ ======================
+
+        # Наша проверка будет работать до основной логики авторизации.
+        # Мы проверяем только события добавления дочерних комнат.
+        if event.type == EventTypes.SpaceChild:
+            # Получаем DataStore. Мы можем сделать это через state_res_store,
+            # который передается в функцию.
+            store = state_res_store.main_store  # У нас есть доступ к main_store
+
+            # Проверяем, является ли родитель "Группой" с лимитами.
+            limits = await store.get_room_limits(room_id)
+
+            if limits and limits.get("max_chats") is not None:
+                max_chats_limit = limits["max_chats"]
+
+                # Получаем текущее количество дочерних чатов.
+                # Мы не можем использовать `get_state_for_key`, так как у нас нет полного
+                # объекта StateHandler. Вместо этого мы используем `base_state`, который
+                # представляет собой состояние до применения этого батча событий.
+
+                # Фильтруем `base_state`, чтобы найти все существующие дочерние комнаты.
+                current_children = {
+                    key: ev_id for (key, ev_id) in base_state.items()
+                    if key[0] == EventTypes.SpaceChild
+                }
+                current_chat_count = len(current_children)
+
+                logger.info(
+                    "Проверка лимита чатов для группы %s: текущее кол-во %d, лимит %d",
+                    room_id,
+                    current_chat_count,
+                    max_chats_limit,
+                )
+
+                # Проверяем, не является ли это событие обновлением уже существующей привязки
+                is_update = (event.type, event.state_key) in current_children
+
+                if not is_update and current_chat_count >= max_chats_limit:
+                    # Если лимит достигнут и это не обновление, отклоняем событие.
+                    raise SynapseError(
+                        403,
+                        f"В пространстве достигнут максимальный лимит чатов ({max_chats_limit}).",
+                        errcode=Codes.FORBIDDEN,
+                    )
+
+        # ===================== КОНЕЦ КАСТОМНОГО БЛОКА ПРОВЕРКИ ЛИМИТА ЧАТОВ =======================
 
         auth_events = {}
         for aid in event.auth_event_ids():
