@@ -1945,6 +1945,31 @@ class RoomWorkerStore(CacheInvalidationWorkerStore):
             desc="get_current_room_membership_count",
         )
 
+    async def get_room_join_rule(self, room_id: str) -> str:
+        """
+        Получает текущее правило входа (join_rule) для комнаты.
+        Возвращает 'invite' по умолчанию, если правило не установлено.
+        """
+
+        def _get_join_rule_txn(txn: LoggingTransaction) -> Optional[str]:
+            sql = """
+                SELECT ej.json::jsonb->'content'->>'join_rule'
+                FROM current_state_events cs
+                JOIN event_json ej ON cs.event_id = ej.event_id
+                WHERE cs.room_id = ? AND cs.type = ? AND cs.state_key = ''
+            """
+            txn.execute(sql, (room_id, EventTypes.JoinRules))
+            row = txn.fetchone()
+            if row:
+                return row[0]
+            return None
+
+        join_rule = await self.db_pool.runInteraction(
+            "get_room_join_rule", _get_join_rule_txn
+        )
+
+        return join_rule or JoinRules.INVITE
+
 
 class _BackgroundUpdates:
     REMOVE_TOMESTONED_ROOMS_BG_UPDATE = "remove_tombstoned_rooms_from_directory"
@@ -2780,3 +2805,76 @@ class RoomStore(RoomBackgroundUpdateStore, RoomWorkerStore):
             retcol="room_id",
             desc="get_parent_spaces_for_room",
         )
+
+    # --- НАЧАЛО ФИНАЛЬНОЙ ВЕРСИИ is_room_a_space ---
+    async def is_room_a_space(self, room_id: str) -> bool:
+        """
+        Проверяет, является ли данная комната пространством (m.space),
+        анализируя ее событие создания (m.room.create).
+        """
+
+        def _is_room_a_space_txn(txn: LoggingTransaction) -> bool:
+            # Получаем event_id для события создания комнаты
+            sql_get_event_id = """
+                SELECT event_id FROM current_state_events
+                WHERE room_id = ? AND type = ? AND state_key = ''
+            """
+            txn.execute(sql_get_event_id, (room_id, EventTypes.Create))
+            row = txn.fetchone()
+            if not row:
+                # Если нет события создания, это точно не пространство
+                return False
+
+            create_event_id = row[0]
+
+            # Получаем JSON события по его ID
+            sql_get_json = """
+                SELECT json FROM event_json WHERE event_id = ?
+            """
+            txn.execute(sql_get_json, (create_event_id,))
+            row = txn.fetchone()
+            if not row:
+                return False
+
+            event_content = db_to_json(row[0]).get("content", {})
+            return event_content.get(
+                EventContentFields.ROOM_TYPE) == EventTypes.SpaceParent
+
+        return await self.db_pool.runInteraction(
+            "is_room_a_space", _is_room_a_space_txn
+        )
+
+    # --- КОНЕЦ ФИНАЛЬНОЙ ВЕРСИИ is_room_a_space ---
+
+    # --- НАЧАЛО ИСПРАВЛЕННОГО МЕТОДА ---
+    async def get_child_rooms_for_space(
+        self, space_id: str
+    ) -> List[Tuple[str, str]]:
+        """
+        Находит все дочерние комнаты для данного пространства и их правила входа.
+
+        Returns:
+            Список кортежей, где каждый кортеж содержит (room_id, join_rule).
+        """
+        # ИСПРАВЛЕНИЕ: Добавлен INNER JOIN с event_json для доступа к `content`.
+        sql = """
+            SELECT
+                child.state_key AS room_id,
+                ej.json::jsonb->'content'->>'join_rule' as join_rule
+            FROM current_state_events AS child
+            LEFT JOIN current_state_events AS jr
+                ON (child.state_key = jr.room_id AND jr.type = ? AND jr.state_key = '')
+            LEFT JOIN event_json AS ej
+                ON (jr.event_id = ej.event_id)
+            WHERE
+                child.room_id = ?
+                AND child.type = ?
+        """
+        rows = await self.db_pool.execute(
+            "get_child_rooms_for_space", sql, EventTypes.JoinRules, space_id,
+            EventTypes.SpaceChild
+        )
+        # Возвращаем join_rule по умолчанию 'invite', если он не установлен
+        return [(row[0], row[1] or JoinRules.INVITE) for row in rows]
+
+    # --- КОНЕЦ ИСПРАВЛЕННОГО БЛОКА ---
