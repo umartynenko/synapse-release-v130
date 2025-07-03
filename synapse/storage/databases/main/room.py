@@ -1970,6 +1970,39 @@ class RoomWorkerStore(CacheInvalidationWorkerStore):
 
         return join_rule or JoinRules.INVITE
 
+    async def get_children_with_chat_types(self, room_id: str) -> List[
+        Dict[str, Any]]:
+        """
+        Находит все дочерние комнаты для данного пространства и возвращает их ID
+        вместе с их 'custom.chat_type' из события создания.
+        """
+
+        # *** ФИНАЛЬНАЯ ВЕРСИЯ: Ручное преобразование в словарь для 100% надежности ***
+        def _get_children_txn(txn):
+            sql = """
+                    SELECT
+                        cse_child.state_key as room_id,
+                        jsonb_extract_path_text(ej.json::jsonb, 'content', 'custom.chat_type') as chat_type
+                    FROM current_state_events AS cse_child
+                    JOIN current_state_events AS cse_create
+                        ON cse_child.state_key = cse_create.room_id
+                        AND cse_create.type = 'm.room.create' AND cse_create.state_key = ''
+                    JOIN event_json AS ej ON cse_create.event_id = ej.event_id
+                    WHERE
+                        cse_child.room_id = ?
+                        AND cse_child.type = 'm.space.child'
+                """
+            txn.execute(sql, (room_id,))
+
+            # Получаем названия колонок из курсора
+            cols = [desc[0] for desc in txn.description]
+            # Вручную создаем список словарей
+            return [dict(zip(cols, row)) for row in txn.fetchall()]
+
+        return await self.db_pool.runInteraction(
+            "get_children_with_chat_types", _get_children_txn
+        )
+
 
 class _BackgroundUpdates:
     REMOVE_TOMESTONED_ROOMS_BG_UPDATE = "remove_tombstoned_rooms_from_directory"
@@ -2838,7 +2871,7 @@ class RoomStore(RoomBackgroundUpdateStore, RoomWorkerStore):
 
             event_content = db_to_json(row[0]).get("content", {})
             return event_content.get(
-                EventContentFields.ROOM_TYPE) == EventTypes.SpaceParent
+                EventContentFields.ROOM_TYPE) == EventTypes.SpaceChild
 
         return await self.db_pool.runInteraction(
             "is_room_a_space", _is_room_a_space_txn
