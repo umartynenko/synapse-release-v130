@@ -1067,11 +1067,15 @@ class RoomCreationHandler:
             try:
                 space_name = config.get("name", "Новое пространство")
 
-                async def _create_child_room_and_join(name: str, preset: str) -> str:
+                async def _create_child_room_and_join(name: str, preset: str, chat_type: str) -> str:
                     """Создает дочернюю комнату и возвращает ее ID."""
                     child_room_config = {
                         "preset": preset,
                         "name": name,
+                        "creation_content": {
+                            "custom.room_category": "chat",
+                            "custom.chat_type": chat_type
+                        }
                     }
 
                     child_room_id, _, _ = await self.create_room(
@@ -1105,12 +1109,14 @@ class RoomCreationHandler:
                 await _create_child_room_and_join(
                     name=f"{space_name} - ОЧ",
                     preset=RoomCreationPreset.PUBLIC_CHAT,
+                    chat_type="public_chat",
                 )
 
                 # Создаем приватный чат
                 private_chat_id = await _create_child_room_and_join(
                     name=f"{space_name} - ЗЧ",
-                    preset=RoomCreationPreset.PRIVATE_CHAT,
+                    preset=RoomCreationPreset.PUBLIC_CHAT,
+                    chat_type="private_chat",
                 )
 
                 # Даже если комната была создана с правилом "invite",
