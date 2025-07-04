@@ -2003,6 +2003,45 @@ class RoomWorkerStore(CacheInvalidationWorkerStore):
             "get_children_with_chat_types", _get_children_txn
         )
 
+    async def get_rooms_by_custom_category(self, category: str) -> List[Dict[str, Any]]:
+        """
+        Находит все комнаты с заданным значением 'custom.room_category'
+        в их m.room.create событии. Возвращает их ID и имя.
+
+        ФИНАЛЬНАЯ, УНИВЕРСАЛЬНАЯ ВЕРСИЯ.
+        """
+
+        def _get_rooms_by_category_txn(txn):
+            # Этот SQL-запрос абсолютно стандартный и надежный
+            sql = """
+                SELECT
+                    r.room_id as id,
+                    cs_name.json::jsonb->'content'->>'name' as name
+                FROM rooms r
+                JOIN current_state_events AS cs_create
+                    ON r.room_id = cs_create.room_id
+                    AND cs_create.type = 'm.room.create'
+                JOIN event_json AS ej
+                    ON cs_create.event_id = ej.event_id
+                LEFT JOIN current_state_events AS cs_name_events
+                    ON r.room_id = cs_name_events.room_id
+                    AND cs_name_events.type = 'm.room.name' AND cs_name_events.state_key = ''
+                LEFT JOIN event_json AS cs_name
+                    ON cs_name_events.event_id = cs_name.event_id
+                WHERE
+                    jsonb_extract_path_text(ej.json::jsonb, 'content', 'custom.room_category') = ?
+            """
+            txn.execute(sql, (category,))
+
+            # Стандартный, универсальный способ преобразования результата в словарь.
+            # Не зависит от версии Synapse.
+            cols = [desc[0] for desc in txn.description]
+            return [dict(zip(cols, row)) for row in txn.fetchall()]
+
+        return await self.db_pool.runInteraction(
+            "get_rooms_by_custom_category", _get_rooms_by_category_txn
+        )
+
 
 class _BackgroundUpdates:
     REMOVE_TOMESTONED_ROOMS_BG_UPDATE = "remove_tombstoned_rooms_from_directory"
