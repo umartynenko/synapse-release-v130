@@ -36,7 +36,7 @@
 import logging
 from http import HTTPStatus
 from typing import TYPE_CHECKING, Optional, Tuple
-from . import room_children, filtered_rooms
+from . import room_children, filtered_rooms, hierarchy_members
 
 from synapse.api.errors import Codes, NotFoundError, SynapseError
 from synapse.handlers.pagination import PURGE_HISTORY_ACTION_NAME
@@ -341,6 +341,7 @@ def register_servlets(hs: "HomeServer", http_server: HttpServer) -> None:
     CreateSpaceStructureServlet(hs).register(http_server)
     room_children.register_servlets(hs, http_server)
     filtered_rooms.register_servlets(hs, http_server)
+    hierarchy_members.register_servlets(hs, http_server)
 
 
 def register_servlets_for_client_rest_resource(
