@@ -2042,6 +2042,65 @@ class RoomWorkerStore(CacheInvalidationWorkerStore):
             "get_rooms_by_custom_category", _get_rooms_by_category_txn
         )
 
+    async def get_all_descendant_spaces(self, room_id: str) -> List[str]:
+        """
+        Получает все дочерние пространства для данного пространства.
+        Возвращает список ID дочерних пространств.
+        """
+
+        def _get_all_descendant_spaces_txn(txn):
+            sql = """
+                WITH RECURSIVE space_hierarchy(child_room_id) AS (
+                    -- Базовый случай: прямые дочерние элементы
+                    SELECT state_key FROM current_state_events
+                    WHERE room_id = ? AND type = 'm.space.child'
+
+                    UNION ALL
+
+                    -- Рекурсивный шаг: дочерние элементы дочерних элементов
+                    SELECT cse.state_key
+                    FROM current_state_events cse
+                    JOIN space_hierarchy sh ON cse.room_id = sh.child_room_id
+                    WHERE cse.type = 'm.space.child'
+                )
+                SELECT DISTINCT child_room_id FROM space_hierarchy
+            """
+            txn.execute(sql, (room_id,))
+            return [row[0] for row in txn.fetchall()]
+
+        return await self.db_pool.runInteraction(
+            "get_all_descendant_spaces", _get_all_descendant_spaces_txn
+        )
+
+    async def get_members_in_rooms(self, room_ids: list[str]) -> list[str]:
+        """
+        Получает список участников для каждой комнаты в заданном списке.
+
+        Args:
+            room_ids: Список ID комнат.
+
+        Returns:
+            Словарь, где ключ - ID комнаты, а значение - список участников.
+        """
+        if not room_ids:
+            return []
+
+        def _get_members_in_rooms_txn(txn):
+            placeholders = ",".join("?" for _ in room_ids)
+            sql = f"""
+                SELECT DISTINCT user_id FROM room_memberships
+                WHERE room_id IN ({placeholders}) AND membership = 'join'
+            """
+
+            # Выполняем запрос с параметрами
+            txn.execute(sql, room_ids)
+
+            return [row[0] for row in txn.fetchall()]
+
+        return await self.db_pool.runInteraction(
+            "get_members_in_rooms", _get_members_in_rooms_txn
+        )
+
 
 class _BackgroundUpdates:
     REMOVE_TOMESTONED_ROOMS_BG_UPDATE = "remove_tombstoned_rooms_from_directory"
