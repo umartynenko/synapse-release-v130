@@ -2101,6 +2101,24 @@ class RoomWorkerStore(CacheInvalidationWorkerStore):
             "get_members_in_rooms", _get_members_in_rooms_txn
         )
 
+    async def get_room_chat_type(self, room_id: str) -> Optional[str]:
+        """Получает `custom.chat_type` из события создания для одной комнаты."""
+
+        def _get_room_chat_type_txn(txn: LoggingTransaction) -> Optional[str]:
+            # Этот SQL-запрос использует тот же синтаксис, что и ваши другие методы
+            sql = """
+                SELECT jsonb_extract_path_text(ej.json::jsonb, 'content', 'custom.chat_type')
+                FROM current_state_events cs
+                JOIN event_json ej ON cs.event_id = ej.event_id
+                WHERE cs.room_id = ? AND cs.type = ? AND cs.state_key = ''
+            """
+            txn.execute(sql, (room_id, EventTypes.Create))
+            row = txn.fetchone()
+            return row[0] if row else None
+
+        return await self.db_pool.runInteraction("get_room_chat_type",
+                                                 _get_room_chat_type_txn)
+
 
 class _BackgroundUpdates:
     REMOVE_TOMESTONED_ROOMS_BG_UPDATE = "remove_tombstoned_rooms_from_directory"
