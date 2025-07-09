@@ -1115,7 +1115,7 @@ class RoomCreationHandler:
                 # Создаем приватный чат
                 private_chat_id = await _create_child_room_and_join(
                     name=f"{space_name} - ЗЧ",
-                    preset=RoomCreationPreset.PUBLIC_CHAT,
+                    preset=RoomCreationPreset.PRIVATE_CHAT,
                     chat_type="private_chat",
                 )
 
