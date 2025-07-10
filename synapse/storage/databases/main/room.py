@@ -35,6 +35,7 @@ from typing import (
     Tuple,
     Union,
     cast,
+    Set,
 )
 
 import attr
@@ -1933,6 +1934,191 @@ class RoomWorkerStore(CacheInvalidationWorkerStore):
                 desc="set_room_is_public_appservice_false",
             )
 
+    async def get_current_room_membership_count(self, room_id: str) -> int:
+        """
+        Эффективно подсчитывает текущее количество участников (join) в комнате.
+        """
+        return await self.db_pool.simple_select_one_onecol(
+            table="room_memberships",
+            keyvalues={"room_id": room_id, "membership": "join"},
+            retcol="COUNT(*)",
+            desc="get_current_room_membership_count",
+        )
+
+    async def get_room_join_rule(self, room_id: str) -> str:
+        """
+        Получает текущее правило входа (join_rule) для комнаты.
+        Возвращает 'invite' по умолчанию, если правило не установлено.
+        """
+
+        def _get_join_rule_txn(txn: LoggingTransaction) -> Optional[str]:
+            sql = """
+                SELECT ej.json::jsonb->'content'->>'join_rule'
+                FROM current_state_events cs
+                JOIN event_json ej ON cs.event_id = ej.event_id
+                WHERE cs.room_id = ? AND cs.type = ? AND cs.state_key = ''
+            """
+            txn.execute(sql, (room_id, EventTypes.JoinRules))
+            row = txn.fetchone()
+            if row:
+                return row[0]
+            return None
+
+        join_rule = await self.db_pool.runInteraction(
+            "get_room_join_rule", _get_join_rule_txn
+        )
+
+        return join_rule or JoinRules.INVITE
+
+    async def get_children_with_chat_types(self, room_id: str) -> List[
+        Dict[str, Any]]:
+        """
+        Находит все дочерние комнаты для данного пространства и возвращает их ID
+        вместе с их 'custom.chat_type' из события создания.
+        """
+
+        # *** ФИНАЛЬНАЯ ВЕРСИЯ: Ручное преобразование в словарь для 100% надежности ***
+        def _get_children_txn(txn):
+            sql = """
+                    SELECT
+                        cse_child.state_key as room_id,
+                        jsonb_extract_path_text(ej.json::jsonb, 'content', 'custom.chat_type') as chat_type
+                    FROM current_state_events AS cse_child
+                    JOIN current_state_events AS cse_create
+                        ON cse_child.state_key = cse_create.room_id
+                        AND cse_create.type = 'm.room.create' AND cse_create.state_key = ''
+                    JOIN event_json AS ej ON cse_create.event_id = ej.event_id
+                    WHERE
+                        cse_child.room_id = ?
+                        AND cse_child.type = 'm.space.child'
+                """
+            txn.execute(sql, (room_id,))
+
+            # Получаем названия колонок из курсора
+            cols = [desc[0] for desc in txn.description]
+            # Вручную создаем список словарей
+            return [dict(zip(cols, row)) for row in txn.fetchall()]
+
+        return await self.db_pool.runInteraction(
+            "get_children_with_chat_types", _get_children_txn
+        )
+
+    async def get_rooms_by_custom_category(self, category: str) -> List[Dict[str, Any]]:
+        """
+        Находит все комнаты с заданным значением 'custom.room_category'
+        в их m.room.create событии. Возвращает их ID и имя.
+
+        ФИНАЛЬНАЯ, УНИВЕРСАЛЬНАЯ ВЕРСИЯ.
+        """
+
+        def _get_rooms_by_category_txn(txn):
+            # Этот SQL-запрос абсолютно стандартный и надежный
+            sql = """
+                SELECT
+                    r.room_id as id,
+                    cs_name.json::jsonb->'content'->>'name' as name
+                FROM rooms r
+                JOIN current_state_events AS cs_create
+                    ON r.room_id = cs_create.room_id
+                    AND cs_create.type = 'm.room.create'
+                JOIN event_json AS ej
+                    ON cs_create.event_id = ej.event_id
+                LEFT JOIN current_state_events AS cs_name_events
+                    ON r.room_id = cs_name_events.room_id
+                    AND cs_name_events.type = 'm.room.name' AND cs_name_events.state_key = ''
+                LEFT JOIN event_json AS cs_name
+                    ON cs_name_events.event_id = cs_name.event_id
+                WHERE
+                    jsonb_extract_path_text(ej.json::jsonb, 'content', 'custom.room_category') = ?
+            """
+            txn.execute(sql, (category,))
+
+            # Стандартный, универсальный способ преобразования результата в словарь.
+            # Не зависит от версии Synapse.
+            cols = [desc[0] for desc in txn.description]
+            return [dict(zip(cols, row)) for row in txn.fetchall()]
+
+        return await self.db_pool.runInteraction(
+            "get_rooms_by_custom_category", _get_rooms_by_category_txn
+        )
+
+    async def get_all_descendant_spaces(self, room_id: str) -> List[str]:
+        """
+        Получает все дочерние пространства для данного пространства.
+        Возвращает список ID дочерних пространств.
+        """
+
+        def _get_all_descendant_spaces_txn(txn):
+            sql = """
+                WITH RECURSIVE space_hierarchy(child_room_id) AS (
+                    -- Базовый случай: прямые дочерние элементы
+                    SELECT state_key FROM current_state_events
+                    WHERE room_id = ? AND type = 'm.space.child'
+
+                    UNION ALL
+
+                    -- Рекурсивный шаг: дочерние элементы дочерних элементов
+                    SELECT cse.state_key
+                    FROM current_state_events cse
+                    JOIN space_hierarchy sh ON cse.room_id = sh.child_room_id
+                    WHERE cse.type = 'm.space.child'
+                )
+                SELECT DISTINCT child_room_id FROM space_hierarchy
+            """
+            txn.execute(sql, (room_id,))
+            return [row[0] for row in txn.fetchall()]
+
+        return await self.db_pool.runInteraction(
+            "get_all_descendant_spaces", _get_all_descendant_spaces_txn
+        )
+
+    async def get_members_in_rooms(self, room_ids: list[str]) -> list[str]:
+        """
+        Получает список участников для каждой комнаты в заданном списке.
+
+        Args:
+            room_ids: Список ID комнат.
+
+        Returns:
+            Словарь, где ключ - ID комнаты, а значение - список участников.
+        """
+        if not room_ids:
+            return []
+
+        def _get_members_in_rooms_txn(txn):
+            placeholders = ",".join("?" for _ in room_ids)
+            sql = f"""
+                SELECT DISTINCT user_id FROM room_memberships
+                WHERE room_id IN ({placeholders}) AND membership = 'join'
+            """
+
+            # Выполняем запрос с параметрами
+            txn.execute(sql, room_ids)
+
+            return [row[0] for row in txn.fetchall()]
+
+        return await self.db_pool.runInteraction(
+            "get_members_in_rooms", _get_members_in_rooms_txn
+        )
+
+    async def get_room_chat_type(self, room_id: str) -> Optional[str]:
+        """Получает `custom.chat_type` из события создания для одной комнаты."""
+
+        def _get_room_chat_type_txn(txn: LoggingTransaction) -> Optional[str]:
+            # Этот SQL-запрос использует тот же синтаксис, что и ваши другие методы
+            sql = """
+                SELECT jsonb_extract_path_text(ej.json::jsonb, 'content', 'custom.chat_type')
+                FROM current_state_events cs
+                JOIN event_json ej ON cs.event_id = ej.event_id
+                WHERE cs.room_id = ? AND cs.type = ? AND cs.state_key = ''
+            """
+            txn.execute(sql, (room_id, EventTypes.Create))
+            row = txn.fetchone()
+            return row[0] if row else None
+
+        return await self.db_pool.runInteraction("get_room_chat_type",
+                                                 _get_room_chat_type_txn)
+
 
 class _BackgroundUpdates:
     REMOVE_TOMESTONED_ROOMS_BG_UPDATE = "remove_tombstoned_rooms_from_directory"
@@ -2743,3 +2929,101 @@ class RoomStore(RoomBackgroundUpdateStore, RoomWorkerStore):
                 WHERE stream_id <= ?
             """
             txn.execute(sql, (device_lists_stream_id,))
+
+    async def get_parent_spaces_for_room(self, room_id: str) -> List[str]:
+        """Находит ID всех пространств, которые являются непосредственными
+        родителями для данной комнаты.
+
+        Работает путем поиска активных событий 'm.space.child' в таблице
+        текущего состояния (current_state_events).
+
+        Args:
+            room_id: ID дочерней комнаты.
+
+        Returns:
+            Список ID родительских пространств.
+        """
+        # ИЗМЕНЕНИЕ: Используем таблицу current_state_events и убираем
+        # проверку несуществующей колонки "deleted".
+        return await self.db_pool.simple_select_onecol(
+            table="current_state_events",
+            keyvalues={
+                "type": EventTypes.SpaceChild,
+                "state_key": room_id,
+            },
+            retcol="room_id",
+            desc="get_parent_spaces_for_room",
+        )
+
+    # --- НАЧАЛО ФИНАЛЬНОЙ ВЕРСИИ is_room_a_space ---
+    async def is_room_a_space(self, room_id: str) -> bool:
+        """
+        Проверяет, является ли данная комната пространством (m.space),
+        анализируя ее событие создания (m.room.create).
+        """
+
+        def _is_room_a_space_txn(txn: LoggingTransaction) -> bool:
+            # Получаем event_id для события создания комнаты
+            sql_get_event_id = """
+                SELECT event_id FROM current_state_events
+                WHERE room_id = ? AND type = ? AND state_key = ''
+            """
+            txn.execute(sql_get_event_id, (room_id, EventTypes.Create))
+            row = txn.fetchone()
+            if not row:
+                # Если нет события создания, это точно не пространство
+                return False
+
+            create_event_id = row[0]
+
+            # Получаем JSON события по его ID
+            sql_get_json = """
+                SELECT json FROM event_json WHERE event_id = ?
+            """
+            txn.execute(sql_get_json, (create_event_id,))
+            row = txn.fetchone()
+            if not row:
+                return False
+
+            event_content = db_to_json(row[0]).get("content", {})
+            return event_content.get(
+                EventContentFields.ROOM_TYPE) == EventTypes.SpaceChild
+
+        return await self.db_pool.runInteraction(
+            "is_room_a_space", _is_room_a_space_txn
+        )
+
+    # --- КОНЕЦ ФИНАЛЬНОЙ ВЕРСИИ is_room_a_space ---
+
+    # --- НАЧАЛО ИСПРАВЛЕННОГО МЕТОДА ---
+    async def get_child_rooms_for_space(
+        self, space_id: str
+    ) -> List[Tuple[str, str]]:
+        """
+        Находит все дочерние комнаты для данного пространства и их правила входа.
+
+        Returns:
+            Список кортежей, где каждый кортеж содержит (room_id, join_rule).
+        """
+        # ИСПРАВЛЕНИЕ: Добавлен INNER JOIN с event_json для доступа к `content`.
+        sql = """
+            SELECT
+                child.state_key AS room_id,
+                ej.json::jsonb->'content'->>'join_rule' as join_rule
+            FROM current_state_events AS child
+            LEFT JOIN current_state_events AS jr
+                ON (child.state_key = jr.room_id AND jr.type = ? AND jr.state_key = '')
+            LEFT JOIN event_json AS ej
+                ON (jr.event_id = ej.event_id)
+            WHERE
+                child.room_id = ?
+                AND child.type = ?
+        """
+        rows = await self.db_pool.execute(
+            "get_child_rooms_for_space", sql, EventTypes.JoinRules, space_id,
+            EventTypes.SpaceChild
+        )
+        # Возвращаем join_rule по умолчанию 'invite', если он не установлен
+        return [(row[0], row[1] or JoinRules.INVITE) for row in rows]
+
+    # --- КОНЕЦ ИСПРАВЛЕННОГО БЛОКА ---

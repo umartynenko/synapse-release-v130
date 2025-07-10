@@ -85,6 +85,7 @@ from .transactions import TransactionWorkerStore
 from .ui_auth import UIAuthStore
 from .user_directory import UserDirectoryStore
 from .user_erasure_store import UserErasureStore
+from .room_limits import RoomLimitsStore
 
 if TYPE_CHECKING:
     from synapse.server import HomeServer
@@ -160,6 +161,7 @@ class DataStore(
     TaskSchedulerWorkerStore,
     SlidingSyncStore,
     DelayedEventsStore,
+    RoomLimitsStore,
 ):
     def __init__(
         self,

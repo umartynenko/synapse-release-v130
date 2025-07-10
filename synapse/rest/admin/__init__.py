@@ -36,6 +36,7 @@
 import logging
 from http import HTTPStatus
 from typing import TYPE_CHECKING, Optional, Tuple
+from . import room_children, filtered_rooms, hierarchy_members
 
 from synapse.api.errors import Codes, NotFoundError, SynapseError
 from synapse.handlers.pagination import PURGE_HISTORY_ACTION_NAME
@@ -54,6 +55,7 @@ from synapse.rest.admin.devices import (
     DevicesGetRestServlet,
     DevicesRestServlet,
 )
+from synapse.rest.admin.create_space_structure import CreateSpaceStructureServlet
 from synapse.rest.admin.event_reports import (
     EventReportDetailRestServlet,
     EventReportsRestServlet,
@@ -336,6 +338,10 @@ def register_servlets(hs: "HomeServer", http_server: HttpServer) -> None:
     ExperimentalFeaturesRestServlet(hs).register(http_server)
     SuspendAccountRestServlet(hs).register(http_server)
     ScheduledTasksRestServlet(hs).register(http_server)
+    CreateSpaceStructureServlet(hs).register(http_server)
+    room_children.register_servlets(hs, http_server)
+    filtered_rooms.register_servlets(hs, http_server)
+    hierarchy_members.register_servlets(hs, http_server)
 
 
 def register_servlets_for_client_rest_resource(
