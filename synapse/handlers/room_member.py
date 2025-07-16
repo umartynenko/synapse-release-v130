@@ -1058,160 +1058,15 @@ class RoomMemberHandler(metaclass=abc.ABCMeta):
 
         assert event.internal_metadata.stream_ordering
 
-        if event and event.membership in (Membership.JOIN, Membership.INVITE):
-            try:
-                parent_spaces = await self.store.get_parent_spaces_for_room(room_id)
-
-                if parent_spaces:
-                    target_user_id = UserID.from_string(event.state_key)
-                    target_requester = create_requester(target_user_id)
-
-                    system_user_id_str = self.config.servernotices.server_notices_mxid
-                    if not system_user_id_str:
-                        logger.error(
-                            "Cannot auto-join: server_notices_mxid not configured.")
-                        return event.event_id, event.internal_metadata.stream_ordering
-
-                    system_requester = create_requester(system_user_id_str)
-
-                    for space_id in parent_spaces:
-                        current_membership, _ = await self.store.get_local_current_membership_for_user_in_room(
-                            target_user_id.to_string(), space_id
-                        )
-                        if current_membership == Membership.JOIN:
-                            continue
-
-                        logger.info(
-                            "Auto-joining user %s to parent space %s (child room: %s)",
-                            target_user_id, space_id, room_id,
-                        )
-
-                        if current_membership != Membership.INVITE:
-                            logger.info("Step 1: System user %s inviting %s to %s",
-                                        system_user_id_str, target_user_id, space_id)
-                            await self.update_membership(
-                                requester=system_requester,
-                                target=target_user_id,
-                                room_id=space_id,
-                                action="invite",
-                                ratelimit=False,
-                            )
-
-                        logger.info("Step 2: User %s accepting invite to %s",
-                                    target_user_id, space_id)
-                        await self.update_membership(
-                            requester=target_requester,
-                            target=target_user_id,
-                            room_id=space_id,
-                            action="join",
-                            ratelimit=False,
-                            require_consent=False,
-                        )
-
-            except Exception:
-                logger.exception(
-                    "Failed to auto-join user %s to parent spaces for room %s",
-                    event.state_key,
-                    room_id,
-                )
-        # КОНЕЦ СУЩЕСТВУЮЩЕГО БЛОКА
-
-        # --- НАЧАЛО НОВОГО БЛОКА ---
-        # =======================================================================
-        # НОВЫЙ БЛОК: АВТО-ПРИСОЕДИНЕНИЕ К ДОЧЕРНИМ ЧАТАМ ПРОСТРАНСТВА
-        # Этот блок сработает, когда пользователь успешно присоединился к комнате,
-        # и эта комната является пространством.
-        # =======================================================================
-        # if event and event.membership == Membership.JOIN:
-        #     try:
-        #         # Проверяем, является ли комната, к которой присоединились, пространством
-        #         is_a_space = await self.store.is_room_a_space(room_id)
-        #         if is_a_space:
-        #             logger.info(
-        #                 "User %s joined a space %s. Checking for child chats to auto-join.",
-        #                 event.state_key,
-        #                 room_id,
-        #             )
-        #
-        #             child_rooms = await self.store.get_child_rooms_for_space(room_id)
-        #
-        #             if not child_rooms:
-        #                 logger.info("Space %s has no child chats to auto-join.",
-        #                             room_id)
-        #             else:
-        #                 # Готовим реквестеры, как в логике с родителями
-        #                 target_user_id = UserID.from_string(event.state_key)
-        #                 target_requester = create_requester(target_user_id)
-        #                 system_user_id_str = self.config.servernotices.server_notices_mxid
-        #
-        #                 if not system_user_id_str:
-        #                     logger.error(
-        #                         "Cannot auto-join child chats: server_notices_mxid not configured.")
-        #                 else:
-        #                     system_requester = create_requester(system_user_id_str)
-        #
-        #                     for child_id, join_rule in child_rooms:
-        #                         # --- КЛЮЧЕВОЕ УСЛОВИЕ: Присоединяем только к публичным чатам ---
-        #                         if join_rule != JoinRules.PUBLIC:
-        #                             logger.info(
-        #                                 "Skipping auto-join to non-public child chat %s for user %s.",
-        #                                 child_id,
-        #                                 target_user_id,
-        #                             )
-        #                             continue
-        #
-        #                         # Проверяем, не является ли пользователь уже участником
-        #                         current_child_membership, _ = await self.store.get_local_current_membership_for_user_in_room(
-        #                             target_user_id.to_string(), child_id
-        #                         )
-        #                         if current_child_membership == Membership.JOIN:
-        #                             continue
-        #
-        #                         logger.info(
-        #                             "Auto-joining user %s to public child chat %s of space %s",
-        #                             target_user_id,
-        #                             child_id,
-        #                             room_id,
-        #                         )
-        #
-        #                         # Выполняем двухэтапный процесс: Приглашение -> Вход
-        #                         if current_child_membership != Membership.INVITE:
-        #                             await self.update_membership(
-        #                                 requester=system_requester,
-        #                                 target=target_user_id,
-        #                                 room_id=child_id,
-        #                                 action="invite",
-        #                                 ratelimit=False,
-        #                             )
-        #
-        #                         await self.update_membership(
-        #                             requester=target_requester,
-        #                             target=target_user_id,
-        #                             room_id=child_id,
-        #                             action="join",
-        #                             ratelimit=False,
-        #                             require_consent=False,
-        #                         )
-        #     except Exception:
-        #         logger.exception(
-        #             "Failed to auto-join user %s to child chats for space %s",
-        #             event.state_key,
-        #             room_id,
-        #         )
-        # =======================================================================
-        # КОНЕЦ НОВОГО БЛОКА
-        # =======================================================================
-        assert event.internal_metadata.stream_ordering
-
         # --- НАЧАЛО НОВОГО ФИНАЛЬНОГО БЛОКА ---
         if event and event.membership == Membership.JOIN:
             try:
                 # Определяем контекст точки входа
                 entry_join_rule = await self.store.get_room_join_rule(room_id)
                 await self._handle_hierarchical_join(
-                    room_id,  # <--- ИЗМЕНЕНИЕ 1: Правильное имя аргумента
+                    room_id,
                     event.state_key,
-                    entry_join_rule  # <--- ИЗМЕНЕНИЕ 2: Передаем контекст
+                    entry_join_rule
                 )
             except Exception:
                 logger.exception(
@@ -1269,264 +1124,21 @@ class RoomMemberHandler(metaclass=abc.ABCMeta):
                 e
             )
 
-    # async def _handle_hierarchical_join(
-    #     self, entry_point_room_id: str, user_id_str: str, entry_join_rule: str
-    # ) -> None:
-    #     """
-    #     [КОНТЕКСТНАЯ ВЕРСИЯ] Рекурсивно обрабатывает присоединение,
-    #     учитывая тип точки входа, с поддержкой приватных чатов.
-    #     """
-    #     logger.info(
-    #         "[CONTEXT_JOIN] User %s joined room %s (entry rule: %s). Starting process.",
-    #         user_id_str,
-    #         entry_point_room_id,
-    #         entry_join_rule,
-    #     )
-    #
-    #     # 1. Собираем всех родителей от точки входа
-    #     all_spaces_in_path = set()
-    #     queue = [entry_point_room_id]
-    #     visited = {entry_point_room_id}
-    #
-    #     while queue:
-    #         current_room_id = queue.pop(0)
-    #         parent_ids = await self.store.get_parent_spaces_for_room(current_room_id)
-    #         for parent_id in parent_ids:
-    #             if parent_id not in visited:
-    #                 all_spaces_in_path.add(parent_id)
-    #                 visited.add(parent_id)
-    #                 queue.append(parent_id)
-    #
-    #     initial_room_is_space = await self.store.is_room_a_space(entry_point_room_id)
-    #     if initial_room_is_space:
-    #         all_spaces_in_path.add(entry_point_room_id)
-    #
-    #     logger.info("[CONTEXT_JOIN] Path for %s contains spaces: %s",
-    #                 user_id_str, all_spaces_in_path)
-    #
-    #     if not all_spaces_in_path:
-    #         logger.info("[CONTEXT_JOIN] No parent spaces found. Exiting.")
-    #         return
-    #
-    #     # 2. Подготовка реквестеров
-    #     target_user_id = UserID.from_string(user_id_str)
-    #     target_requester = create_requester(target_user_id)
-    #
-    #     # Проверка конфигурации системного пользователя
-    #     system_user_id_str = self.config.servernotices.server_notices_mxid
-    #     if not system_user_id_str:
-    #         logger.error(
-    #             "[CONTEXT_JOIN] Cannot auto-join: server_notices_mxid not configured.")
-    #         return
-    #     system_requester = create_requester(system_user_id_str)
-    #
-    #     # 3. Обработка каждого пространства в пути
-    #     for space_id in all_spaces_in_path:
-    #         logger.info("[CONTEXT_JOIN] Processing space: %s", space_id)
-    #
-    #         # 3.1. Присоединяем к самому пространству
-    #         current_membership, _ = await self.store.get_local_current_membership_for_user_in_room(
-    #             user_id_str, space_id
-    #         )
-    #         if current_membership != Membership.JOIN:
-    #             logger.info("[CONTEXT_JOIN] Auto-joining user %s to space %s",
-    #                         user_id_str, space_id)
-    #
-    #             if current_membership != Membership.INVITE:
-    #                 logger.info("[CONTEXT_JOIN] Sending invite for space %s", space_id)
-    #                 try:
-    #                     await self.update_membership(
-    #                         requester=system_requester,
-    #                         target=target_user_id,
-    #                         room_id=space_id,
-    #                         action="invite",
-    #                         ratelimit=False,
-    #                     )
-    #                 except Exception as e:
-    #                     logger.warning(
-    #                         "[CONTEXT_JOIN] Failed to invite to space %s: %s", space_id,
-    #                         e
-    #                     )
-    #
-    #             try:
-    #                 await self.update_membership(
-    #                     requester=target_requester,
-    #                     target=target_user_id,
-    #                     room_id=space_id,
-    #                     action="join",
-    #                     ratelimit=False,
-    #                     require_consent=False,
-    #                 )
-    #             except Exception as e:
-    #                 logger.warning(
-    #                     "[CONTEXT_JOIN] Failed to join space %s: %s", space_id, e
-    #                 )
-    #
-    #         # 3.2. Обработка дочерних комнат пространства
-    #         try:
-    #             child_rooms = await self.store.get_child_rooms_for_space(space_id)
-    #             logger.info("[CONTEXT_JOIN] Found %d child rooms for space %s",
-    #                         len(child_rooms), space_id)
-    #
-    #             for child_id, child_join_rule in child_rooms:
-    #                 try:
-    #                     # Пропускаем комнаты, не соответствующие контексту входа
-    #                     if entry_join_rule == JoinRules.PUBLIC:
-    #                         # Для публичного входа - только публичные чаты
-    #                         if child_join_rule == JoinRules.PRIVATE:
-    #                             logger.info(
-    #                                 "[CONTEXT_JOIN] Skipping non-public child %s (rule: %s) "
-    #                                 "because entry context was public.",
-    #                                 child_id, child_join_rule
-    #                             )
-    #                             continue
-    #                     else:
-    #                         # Для приватного входа - все чаты, кроме публичных
-    #                         if child_join_rule == JoinRules.PRIVATE:
-    #                             logger.info(
-    #                                 "[CONTEXT_JOIN] Skipping public child %s (rule: %s) "
-    #                                 "because entry context was private.",
-    #                                 child_id, child_join_rule
-    #                             )
-    #                             continue
-    #
-    #                     # Проверяем текущий статус пользователя
-    #                     current_child_membership, _ = await self.store.get_local_current_membership_for_user_in_room(
-    #                         user_id_str, child_id
-    #                     )
-    #                     if current_child_membership == Membership.JOIN:
-    #                         logger.info(
-    #                             "[CONTEXT_JOIN] User already in child %s. Skipping.",
-    #                             child_id
-    #                         )
-    #                         continue
-    #
-    #                     # Обработка разных типов комнат
-    #                     if child_join_rule == JoinRules.PUBLIC:
-    #                         # Публичная комната: прямой вход
-    #                         logger.info(
-    #                             "[CONTEXT_JOIN] Auto-joining to public child %s (rule: %s)",
-    #                             child_id, child_join_rule
-    #                         )
-    #
-    #                         if current_child_membership != Membership.INVITE:
-    #                             try:
-    #                                 await self.update_membership(
-    #                                     requester=system_requester,
-    #                                     target=target_user_id,
-    #                                     room_id=child_id,
-    #                                     action="invite",
-    #                                     ratelimit=False,
-    #                                 )
-    #                             except Exception as e:
-    #                                 logger.warning(
-    #                                     "[CONTEXT_JOIN] Failed to invite to public child %s: %s",
-    #                                     child_id, e
-    #                                 )
-    #
-    #                         try:
-    #                             await self.update_membership(
-    #                                 requester=target_requester,
-    #                                 target=target_user_id,
-    #                                 room_id=child_id,
-    #                                 action="join",
-    #                                 ratelimit=False,
-    #                                 require_consent=False,
-    #                             )
-    #                         except Exception as e:
-    #                             logger.warning(
-    #                                 "[CONTEXT_JOIN] Failed to join public child %s: %s",
-    #                                 child_id, e
-    #                             )
-    #
-    #                     elif child_join_rule == JoinRules.INVITE:
-    #                         # Приватная комната: приглашение + принятие
-    #                         logger.info(
-    #                             "[CONTEXT_JOIN] Auto-inviting to private child %s (rule: %s)",
-    #                             child_id, child_join_rule
-    #                         )
-    #
-    #                         try:
-    #                             # Этап 1: Приглашение от системного пользователя
-    #                             await self.update_membership(
-    #                                 requester=system_requester,
-    #                                 target=target_user_id,
-    #                                 room_id=child_id,
-    #                                 action="invite",
-    #                                 ratelimit=False,
-    #                             )
-    #
-    #                             # Этап 2: Принятие приглашения
-    #                             await self.update_membership(
-    #                                 requester=target_requester,
-    #                                 target=target_user_id,
-    #                                 room_id=child_id,
-    #                                 action="join",
-    #                                 ratelimit=False,
-    #                                 require_consent=False,
-    #                             )
-    #                         except Exception as e:
-    #                             logger.warning(
-    #                                 "[CONTEXT_JOIN] Failed to process private child %s: %s",
-    #                                 child_id, e
-    #                             )
-    #
-    #                     elif child_join_rule == JoinRules.KNOCK:
-    #                         # Комната с подтверждением: отправка запроса
-    #                         logger.info(
-    #                             "[CONTEXT_JOIN] Auto-knocking on child %s (rule: %s)",
-    #                             child_id, child_join_rule
-    #                         )
-    #
-    #                         try:
-    #                             await self.update_membership(
-    #                                 requester=target_requester,
-    #                                 target=target_user_id,
-    #                                 room_id=child_id,
-    #                                 action="knock",
-    #                                 ratelimit=False,
-    #                                 content={
-    #                                     "reason": "Автоматический запрос при присоединении к пространству"
-    #                                 },
-    #                             )
-    #                         except Exception as e:
-    #                             logger.warning(
-    #                                 "[CONTEXT_JOIN] Failed to knock on child %s: %s",
-    #                                 child_id, e
-    #                             )
-    #
-    #                     else:
-    #                         logger.warning(
-    #                             "[CONTEXT_JOIN] Unsupported join rule %s for child %s",
-    #                             child_join_rule, child_id
-    #                         )
-    #
-    #                 except Exception as e:
-    #                     logger.exception(
-    #                         "[CONTEXT_JOIN] Error processing child %s: %s", child_id, e
-    #                     )
-    #
-    #         except Exception as e:
-    #             logger.exception(
-    #                 "[CONTEXT_JOIN] Error fetching child rooms for space %s: %s",
-    #                 space_id, e
-    #             )
-
     async def _handle_hierarchical_join(
         self, entry_point_room_id: str, user_id_str: str, entry_join_rule: str
     ) -> None:
         """
-        [СТАБИЛЬНАЯ ВЕРСИЯ] Рекурсивно обрабатывает присоединение пользователя,
-        сохраняя оригинальную структуру кода и добавляя контекстную фильтрацию.
+        [КОНТЕКСТНАЯ ВЕРСИЯ] Рекурсивно обрабатывает присоединение,
+        учитывая тип точки входа, с поддержкой приватных чатов.
         """
         logger.info(
-            "[HIERARCHICAL_JOIN] User %s joined room %s (entry rule: %s). Starting process.",
+            "[CONTEXT_JOIN] User %s joined room %s (entry rule: %s). Starting process.",
             user_id_str,
             entry_point_room_id,
             entry_join_rule,
         )
 
-        # 1. Собираем всех родителей от точки входа (логика без изменений)
+        # 1. Собираем всех родителей от точки входа
         all_spaces_in_path = set()
         queue = [entry_point_room_id]
         visited = {entry_point_room_id}
@@ -1544,114 +1156,214 @@ class RoomMemberHandler(metaclass=abc.ABCMeta):
         if initial_room_is_space:
             all_spaces_in_path.add(entry_point_room_id)
 
-        logger.info("[HIERARCHICAL_JOIN] Path for %s contains spaces: %s",
+        logger.info("[CONTEXT_JOIN] Path for %s contains spaces: %s",
                     user_id_str, all_spaces_in_path)
 
         if not all_spaces_in_path:
-            logger.info("[HIERARCHICAL_JOIN] No parent spaces found. Exiting.")
+            logger.info("[CONTEXT_JOIN] No parent spaces found. Exiting.")
             return
 
-        # 2. Подготовка реквестеров (логика без изменений)
+        # 2. Подготовка реквестеров
         target_user_id = UserID.from_string(user_id_str)
         target_requester = create_requester(target_user_id)
+
+        # Проверка конфигурации системного пользователя
         system_user_id_str = self.config.servernotices.server_notices_mxid
         if not system_user_id_str:
             logger.error(
-                "[HIERARCHICAL_JOIN] Cannot auto-join: server_notices_mxid not configured.")
+                "[CONTEXT_JOIN] Cannot auto-join: server_notices_mxid not configured.")
             return
         system_requester = create_requester(system_user_id_str)
 
-        # 3. Обработка каждого пространства в пути (логика без изменений)
+        # 3. Обработка каждого пространства в пути
         for space_id in all_spaces_in_path:
-            logger.info("[HIERARCHICAL_JOIN] Processing space: %s", space_id)
+            logger.info("[CONTEXT_JOIN] Processing space: %s", space_id)
 
-            # 3.1. Присоединяем к самому пространству (логика без изменений)
+            # 3.1. Присоединяем к самому пространству
             current_membership, _ = await self.store.get_local_current_membership_for_user_in_room(
                 user_id_str, space_id
             )
             if current_membership != Membership.JOIN:
-                # Используем _perform_auto_join, как и раньше
-                await self._perform_auto_join(
-                    space_id, target_user_id, system_requester, target_requester
-                )
+                logger.info("[CONTEXT_JOIN] Auto-joining user %s to space %s",
+                            user_id_str, space_id)
 
-            # 3.2. Обработка дочерних комнат пространства (старая структура)
+                if current_membership != Membership.INVITE:
+                    logger.info("[CONTEXT_JOIN] Sending invite for space %s", space_id)
+                    try:
+                        await self.update_membership(
+                            requester=system_requester,
+                            target=target_user_id,
+                            room_id=space_id,
+                            action="invite",
+                            ratelimit=False,
+                        )
+                    except Exception as e:
+                        logger.warning(
+                            "[CONTEXT_JOIN] Failed to invite to space %s: %s", space_id,
+                            e
+                        )
+
+                try:
+                    await self.update_membership(
+                        requester=target_requester,
+                        target=target_user_id,
+                        room_id=space_id,
+                        action="join",
+                        ratelimit=False,
+                        require_consent=False,
+                    )
+                except Exception as e:
+                    logger.warning(
+                        "[CONTEXT_JOIN] Failed to join space %s: %s", space_id, e
+                    )
+
+            # 3.2. Обработка дочерних комнат пространства
             try:
                 child_rooms = await self.store.get_child_rooms_for_space(space_id)
-                logger.info("[HIERARCHICAL_JOIN] Found %d child rooms for space %s",
+                logger.info("[CONTEXT_JOIN] Found %d child rooms for space %s",
                             len(child_rooms), space_id)
 
                 for child_id, child_join_rule in child_rooms:
                     try:
-                        # <--- НАЧАЛО ЕДИНСТВЕННОГО ИЗМЕНЕНИЯ --->
-                        # Правило 1: Если вход был через публичную комнату, пропускаем все непубличные дочерние чаты.
-                        # Если вход был через приватную, этот блок никогда не сработает.
-                        if entry_join_rule == JoinRules.PUBLIC and child_join_rule != JoinRules.PUBLIC:
-                            logger.info(
-                                "[HIERARCHICAL_JOIN] Skipping non-public child %s (rule: %s) because entry context was public.",
-                                child_id, child_join_rule
-                            )
-                            continue
-                        # <--- КОНЕЦ ЕДИНСТВЕННОГО ИЗМЕНЕНИЯ --->
+                        # Пропускаем комнаты, не соответствующие контексту входа
+                        if entry_join_rule == JoinRules.PUBLIC:
+                            # Для публичного входа - только публичные чаты
+                            if child_join_rule != JoinRules.PUBLIC:
+                                logger.info(
+                                    "[CONTEXT_JOIN] Skipping non-public child %s (rule: %s) "
+                                    "because entry context was public.",
+                                    child_id, child_join_rule
+                                )
+                                continue
+                        else:
+                            # Для приватного входа - все чаты, кроме публичных
+                            if child_join_rule == JoinRules.PRIVATE:
+                                logger.info(
+                                    "[CONTEXT_JOIN] Skipping public child %s (rule: %s) "
+                                    "because entry context was private.",
+                                    child_id, child_join_rule
+                                )
+                                continue
 
-                        # Проверяем текущий статус пользователя (логика без изменений)
+                        # Проверяем текущий статус пользователя
                         current_child_membership, _ = await self.store.get_local_current_membership_for_user_in_room(
                             user_id_str, child_id
                         )
                         if current_child_membership == Membership.JOIN:
+                            logger.info(
+                                "[CONTEXT_JOIN] User already in child %s. Skipping.",
+                                child_id
+                            )
                             continue
 
-                        # Вся остальная логика по обработке разных типов комнат остается старой
+                        # Обработка разных типов комнат
                         if child_join_rule == JoinRules.PUBLIC:
+                            # Публичная комната: прямой вход
                             logger.info(
-                                "[HIERARCHICAL_JOIN] Auto-joining to public child %s (rule: %s)",
+                                "[CONTEXT_JOIN] Auto-joining to public child %s (rule: %s)",
                                 child_id, child_join_rule
                             )
-                            await self._perform_auto_join(
-                                child_id, target_user_id, system_requester,
-                                target_requester
+
+                            if current_child_membership != Membership.INVITE:
+                                try:
+                                    await self.update_membership(
+                                        requester=system_requester,
+                                        target=target_user_id,
+                                        room_id=child_id,
+                                        action="invite",
+                                        ratelimit=False,
+                                    )
+                                except Exception as e:
+                                    logger.warning(
+                                        "[CONTEXT_JOIN] Failed to invite to public child %s: %s",
+                                        child_id, e
+                                    )
+
+                            try:
+                                await self.update_membership(
+                                    requester=target_requester,
+                                    target=target_user_id,
+                                    room_id=child_id,
+                                    action="join",
+                                    ratelimit=False,
+                                    require_consent=False,
+                                )
+                            except Exception as e:
+                                logger.warning(
+                                    "[CONTEXT_JOIN] Failed to join public child %s: %s",
+                                    child_id, e
+                                )
+
+                        elif child_join_rule == JoinRules.INVITE:
+                            # Приватная комната: приглашение + принятие
+                            logger.info(
+                                "[CONTEXT_JOIN] Auto-inviting to private child %s (rule: %s)",
+                                child_id, child_join_rule
                             )
 
-                        # elif child_join_rule == JoinRules.INVITE:
-                        #     logger.info(
-                        #         "[HIERARCHICAL_JOIN] Auto-inviting to private child %s (rule: %s)",
-                        #         child_id, child_join_rule
-                        #     )
-                        #     await self._perform_auto_join(
-                        #         child_id, target_user_id, system_requester,
-                        #         target_requester
-                        #     )
+                            try:
+                                # Этап 1: Приглашение от системного пользователя
+                                await self.update_membership(
+                                    requester=system_requester,
+                                    target=target_user_id,
+                                    room_id=child_id,
+                                    action="invite",
+                                    ratelimit=False,
+                                )
+
+                                # Этап 2: Принятие приглашения
+                                await self.update_membership(
+                                    requester=target_requester,
+                                    target=target_user_id,
+                                    room_id=child_id,
+                                    action="join",
+                                    ratelimit=False,
+                                    require_consent=False,
+                                )
+                            except Exception as e:
+                                logger.warning(
+                                    "[CONTEXT_JOIN] Failed to process private child %s: %s",
+                                    child_id, e
+                                )
 
                         elif child_join_rule == JoinRules.KNOCK:
+                            # Комната с подтверждением: отправка запроса
                             logger.info(
-                                "[HIERARCHICAL_JOIN] Auto-knocking on child %s (rule: %s)",
+                                "[CONTEXT_JOIN] Auto-knocking on child %s (rule: %s)",
                                 child_id, child_join_rule
                             )
-                            await self.update_membership(
-                                requester=target_requester,
-                                target=target_user_id,
-                                room_id=child_id,
-                                action="knock",
-                                ratelimit=False,
-                                content={
-                                    "reason": "Автоматический запрос при присоединении к пространству"
-                                },
-                            )
+
+                            try:
+                                await self.update_membership(
+                                    requester=target_requester,
+                                    target=target_user_id,
+                                    room_id=child_id,
+                                    action="knock",
+                                    ratelimit=False,
+                                    content={
+                                        "reason": "Автоматический запрос при присоединении к пространству"
+                                    },
+                                )
+                            except Exception as e:
+                                logger.warning(
+                                    "[CONTEXT_JOIN] Failed to knock on child %s: %s",
+                                    child_id, e
+                                )
+
                         else:
                             logger.warning(
-                                "[HIERARCHICAL_JOIN] Unsupported join rule %s for child %s",
+                                "[CONTEXT_JOIN] Unsupported join rule %s for child %s",
                                 child_join_rule, child_id
                             )
 
                     except Exception as e:
                         logger.exception(
-                            "[HIERARCHICAL_JOIN] Error processing child %s: %s",
-                            child_id, e
+                            "[CONTEXT_JOIN] Error processing child %s: %s", child_id, e
                         )
 
             except Exception as e:
                 logger.exception(
-                    "[HIERARCHICAL_JOIN] Error fetching child rooms for space %s: %s",
+                    "[CONTEXT_JOIN] Error fetching child rooms for space %s: %s",
                     space_id, e
                 )
 
