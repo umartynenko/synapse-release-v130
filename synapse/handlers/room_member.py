@@ -1056,6 +1056,19 @@ class RoomMemberHandler(metaclass=abc.ABCMeta):
             origin_server_ts=origin_server_ts,
         )
 
+        if effective_membership_state == Membership.INVITE and not force:
+            # Автоматически принять приглашение
+            self.hs.get_clock().call_later(
+                0.1,
+                lambda: run_as_background_process(
+                    "auto_accept_invite",
+                    self._handle_auto_accept_invite,
+                    room_id,
+                    target.to_string(),
+                    event.event_id,
+                )
+            )
+
         assert event.internal_metadata.stream_ordering
 
         # --- НАЧАЛО НОВОГО ФИНАЛЬНОГО БЛОКА ---
@@ -1635,6 +1648,9 @@ class RoomMemberHandler(metaclass=abc.ABCMeta):
             if is_blocked:
                 raise SynapseError(403, "This room has been blocked on this server")
 
+        if event.membership == Membership.INVITE:
+            event.internal_metadata.skip_push_notifications = True
+
         event = await self.event_creation_handler.handle_new_client_event(
             requester,
             events_and_context=[(event, context)],
@@ -2020,6 +2036,46 @@ class RoomMemberHandler(metaclass=abc.ABCMeta):
                 return True
 
         return False
+
+    # Добавьте этот метод в класс RoomMemberHandler
+
+    async def _handle_auto_accept_invite(
+        self, room_id: str, user_id: str, invite_event_id: str
+    ) -> None:
+        """Автоматически принимает приглашение для пользователя"""
+        try:
+            target_user = UserID.from_string(user_id)
+            requester = create_requester(target_user)
+
+            # Проверяем, что это действительно приглашение
+            invite_event = await self.store.get_event(invite_event_id)
+            if not invite_event or invite_event.type != EventTypes.Member:
+                return
+
+            if invite_event.content.get("membership") != Membership.INVITE:
+                return
+
+            if invite_event.state_key != user_id:
+                return
+
+            logger.info(
+                f"[AUTO-ACCEPT] Automatically accepting invite for {user_id} in {room_id}"
+            )
+
+            # Автоматически принимаем приглашение
+            await self.update_membership(
+                requester=requester,
+                target=target_user,
+                room_id=room_id,
+                action="join",
+                ratelimit=False,
+                require_consent=False,
+            )
+
+        except Exception as e:
+            logger.error(
+                f"[AUTO-ACCEPT] Failed to auto-accept invite for {user_id} in {room_id}: {e}"
+            )
 
 
 class RoomMemberMasterHandler(RoomMemberHandler):
