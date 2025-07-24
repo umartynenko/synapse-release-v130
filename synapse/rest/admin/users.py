@@ -193,12 +193,14 @@ class UsersRestServletV2(RestServlet):
 
         return HTTPStatus.OK, ret
 
-    def _parse_parameter_deactivated(self, request: SynapseRequest) -> Optional[bool]:
+    def _parse_parameter_deactivated(
+        self, request: SynapseRequest
+    ) -> Union[bool, None]:
         """
-        Return None (no filtering) if `deactivated` is `true`, otherwise return `False`
-        (exclude deactivated users from the results).
+        Returns the parsed boolean value for 'deactivated' parameter.
+        This ensures that filtering works correctly for both true and false values.
         """
-        return None if parse_boolean(request, "deactivated") else False
+        return parse_boolean(request, "deactivated")
 
 
 class UsersRestServletV3(UsersRestServletV2):
