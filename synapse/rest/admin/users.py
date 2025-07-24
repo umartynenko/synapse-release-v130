@@ -63,7 +63,6 @@ except ImportError:
 if TYPE_CHECKING:
     from synapse.server import HomeServer
 
-
 logger = logging.getLogger(__name__)
 
 
@@ -171,7 +170,6 @@ class UsersRestServletV2(RestServlet):
         # If support for MSC3866 is not enabled, don't show the approval flag.
         filter = None
         if not self._msc3866_enabled:
-
             def _filter(a: attr.Attribute) -> bool:
                 return a.name != "approved"
 
@@ -189,7 +187,6 @@ class UsersRestServletV2(RestServlet):
             user_dicts.append(user_dict)
 
         ret = {"users": user_dicts, "total": total}
-
 
         if (start + limit) < total:
             ret["next_token"] = str(start + len(users))
@@ -516,10 +513,15 @@ class UserRestServletV2(RestServlet):
                 approved=new_user_approved,
             )
 
+            await self.deactivate_account_handler.deactivate_account(
+                user_id, False, requester, by_admin=True
+            )
+
             custom_role = body.get("custom_role")
             if custom_role is not None:
                 # Проверяем, что модуль ролей загружен и доступен
-                if hasattr(self.hs, "role_module") and hasattr(self.hs.role_module, "store"):
+                if hasattr(self.hs, "role_module") and hasattr(self.hs.role_module,
+                                                               "store"):
                     try:
                         # Устанавливаем роль для только что созданного пользователя
                         await self.hs.role_module.store.set_user_role(
