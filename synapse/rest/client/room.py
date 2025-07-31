@@ -33,17 +33,19 @@ from prometheus_client.core import Histogram
 from twisted.web.server import Request
 
 from synapse import event_auth
-from synapse.api.constants import Direction, EventTypes, Membership
+from synapse.api.constants import Direction, EventTypes, Membership, RoomCreationPreset
 from synapse.api.errors import (
     AuthError,
     Codes,
     InvalidClientCredentialsError,
     MissingClientTokenError,
+    NotFoundError,
     ShadowBanError,
     SynapseError,
     UnredactedContentDeletedError,
 )
 from synapse.api.filtering import Filter
+from synapse.events import EventBase
 from synapse.events.utils import SerializeEventConfig, format_event_for_client_v2
 from synapse.http.server import HttpServer
 from synapse.http.servlet import (
@@ -184,32 +186,49 @@ class RoomCreateRestServlet(TransactionRestServlet):
     async def _do(
         self, request: SynapseRequest, requester: Requester
     ) -> Tuple[int, JsonDict]:
-        # Проверяем, что наши функции были успешно импортированы
+        has_subscriber_admin_permission = False
+        user_config = self.get_room_config(request)
+
+        initial_state = user_config.get("initial_state", [])
+        parent_space_event = next(
+            (s for s in initial_state if s.get("type") == "m.space.parent"), None)
+
+        if parent_space_event:
+            space_id = parent_space_event.get("state_key")
+            if space_id:
+                admin_event = await self.hs.get_storage_controllers().state.get_current_state_event(
+                    space_id, "dev.martynenko.space.subscriber_admins", ""
+                )
+                if admin_event and requester.user.to_string() in admin_event.content.get(
+                    "users", []):
+                    has_subscriber_admin_permission = True
+                    logger.info(
+                        "User %s is creating a room using Subscriber Admin rights from space %s.",
+                        requester.user,
+                        space_id,
+                    )
+
         if get_user_permissions:
-            # Получаем права пользователя
             user_permissions = await get_user_permissions(self.hs,
                                                           requester.user.to_string())
 
-            # Проверяем разрешение на создание комнаты
-            if not user_permissions.get("create_room", False):
-                # Для более информативного лога получим и роль
+            if not has_subscriber_admin_permission and not user_permissions.get(
+                "create_room", False):
                 user_role = "unknown"
                 if get_user_role:
                     user_role = await get_user_role(self.hs, requester.user.to_string())
 
                 logger.warning(
                     "User %s (role: %s) attempt to create a room denied. "
-                    "Permission 'create_room' is false.",
+                    "Permission 'create_room' is false and no Subscriber Admin rights found.",
                     requester.user,
                     user_role,
                 )
-
-                # Выдаем ошибку, которая прервет выполнение и вернется клиенту
                 raise SynapseError(403, "You do not have permission to create rooms.",
                                    errcode=Codes.FORBIDDEN)
 
         room_id, _, _ = await self._room_creation_handler.create_room(
-            requester, self.get_room_config(request)
+            requester, user_config
         )
 
         return 200, {"room_id": room_id}
@@ -1098,6 +1117,7 @@ class RoomMembershipRestServlet(TransactionRestServlet):
 
     def __init__(self, hs: "HomeServer"):
         super().__init__(hs)
+        self.hs = hs
         self.room_member_handler = hs.get_room_member_handler()
         self.auth = hs.get_auth()
 
@@ -1117,6 +1137,47 @@ class RoomMembershipRestServlet(TransactionRestServlet):
         membership_action: str,
         txn_id: Optional[str],
     ) -> Tuple[int, JsonDict]:
+
+        # <<< НАЧАЛО: НОВАЯ ГИБКАЯ ЛОГИКА ЗАПРЕТА >>>
+        if membership_action == "leave":
+            # Серверные администраторы могут выходить всегда.
+            is_admin = await self.auth.is_server_admin(requester)
+            if is_admin:
+                logger.info("Server admin %s is allowed to leave room %s.",
+                            requester.user, room_id)
+            else:
+                # Для всех остальных пользователей применяем правило №2:
+                # Можно выйти, только если ты создатель комнаты.
+
+                # Получаем событие создания комнаты, чтобы узнать, кто создатель.
+                state_controller = self.hs.get_storage_controllers().state
+                create_event = await state_controller.get_current_state_event(
+                    room_id, EventTypes.Create, ""
+                )
+
+                can_leave = False
+                if create_event:
+                    creator = create_event.content.get("creator")
+                    if creator == requester.user.to_string():
+                        # Пользователь является создателем, разрешаем выход.
+                        can_leave = True
+
+                if can_leave:
+                    logger.info(
+                        "User %s is allowed to leave room %s as they are the creator.",
+                        requester.user, room_id
+                    )
+                else:
+                    # Правило №3: Если пользователь не админ и не создатель - запрещаем.
+                    logger.warning(
+                        "User %s is BLOCKED from leaving room %s because they are not the creator.",
+                        requester.user, room_id
+                    )
+                    raise AuthError(
+                        403, "You can only leave rooms or spaces that you have created."
+                    )
+        # <<< КОНЕЦ: НОВАЯ ГИБКАЯ ЛОГИКА ЗАПРЕТА >>>
+
         if requester.is_guest and membership_action not in {
             Membership.JOIN,
             Membership.LEAVE,
@@ -1231,24 +1292,86 @@ class RoomRedactEventRestServlet(TransactionRestServlet):
         event_id: str,
         txn_id: Optional[str],
     ) -> Tuple[int, JsonDict]:
+        try:
+            redacted_event: Optional[EventBase] = await self._store.get_event(
+                event_id, allow_none=True
+            )
+        except NotFoundError:
+            redacted_event = None
+
+        try:
+            event, event_id_response = await self._do_redaction(
+                request, requester, room_id, event_id, txn_id, check_auth=True
+            )
+
+        except AuthError as e:
+            logger.info(
+                "Standard redaction auth failed for %s. Checking for Subscriber Admin rights.",
+                requester.user
+            )
+
+            is_allowed_by_custom_rules = False
+            state_controller = self.hs.get_storage_controllers().state
+
+            parent_event = await state_controller.get_current_state_event(
+                room_id, "m.space.parent", ""
+            )
+            if parent_event:
+                space_id = parent_event.state_key
+                admin_event = await state_controller.get_current_state_event(
+                    space_id, "dev.martynenko.space.subscriber_admins", ""
+                )
+                if admin_event and requester.user.to_string() in admin_event.content.get(
+                    "users", []):
+                    if redacted_event:
+                        if (redacted_event.type == EventTypes.Create and
+                            redacted_event.sender == requester.user.to_string()):
+                            is_allowed_by_custom_rules = True
+                            logger.info(
+                                "Allowing redaction by Subscriber Admin %s to delete room %s they created.",
+                                requester.user, room_id
+                            )
+
+            if not is_allowed_by_custom_rules:
+                raise e
+
+            logger.info(
+                "Re-sending redaction for %s, bypassing auth checks due to custom rules.",
+                requester.user)
+            event, event_id_response = await self._do_redaction(
+                request, requester, room_id, event_id, txn_id, check_auth=False
+            )
+
+        except ShadowBanError:
+            event_id_response = generate_fake_event_id()
+
+        set_tag("event_id", event_id_response)
+        return 200, {"event_id": event_id_response}
+
+    async def _do_redaction(
+        self,
+        request: SynapseRequest,
+        requester: Requester,
+        room_id: str,
+        event_id: str,
+        txn_id: Optional[str],
+        check_auth: bool,
+    ) -> Tuple["EventBase", str]:
+        """Вспомогательный метод для выполнения редакции с возможностью отключения проверки прав."""
         content = parse_json_object_from_request(request)
 
         requester_suspended = await self._store.get_user_suspended_status(
             requester.user.to_string()
         )
-
         if requester_suspended:
             event = await self._store.get_event(event_id, allow_none=True)
-            if event:
-                if event.sender != requester.user.to_string():
-                    raise SynapseError(
-                        403,
-                        "You can only redact your own events while account is suspended.",
-                        Codes.USER_ACCOUNT_SUSPENDED,
-                    )
+            if event and event.sender != requester.user.to_string():
+                raise SynapseError(
+                    403,
+                    "You can only redact your own events while account is suspended.",
+                    Codes.USER_ACCOUNT_SUSPENDED,
+                )
 
-        # Ensure the redacts property in the content matches the one provided in
-        # the URL.
         room_version = await self._store.get_room_version(room_id)
         if room_version.updated_redaction_rules:
             if "redacts" in content and content["redacts"] != event_id:
@@ -1257,59 +1380,44 @@ class RoomRedactEventRestServlet(TransactionRestServlet):
                     "Cannot provide a redacts value incoherent with the event_id of the URL parameter",
                     Codes.INVALID_PARAM,
                 )
-            else:
-                content["redacts"] = event_id
+            content["redacts"] = event_id
 
-        try:
-            with_relations = None
-            if self._msc3912_enabled and "org.matrix.msc3912.with_relations" in content:
-                with_relations = content["org.matrix.msc3912.with_relations"]
-                del content["org.matrix.msc3912.with_relations"]
+        with_relations = None
+        if self._msc3912_enabled and "org.matrix.msc3912.with_relations" in content:
+            with_relations = content["org.matrix.msc3912.with_relations"]
+            del content["org.matrix.msc3912.with_relations"]
 
-            # Check if there's an existing event for this transaction now (even though
-            # create_and_send_nonmember_event also does it) because, if there's one,
-            # then we want to skip the call to redact_events_related_to.
-            event = None
-            if txn_id:
-                event = await self.event_creation_handler.get_event_from_transaction(
-                    requester, txn_id, room_id
+        event = None
+        if txn_id:
+            event = await self.event_creation_handler.get_event_from_transaction(
+                requester, txn_id, room_id
+            )
+
+        if event is None:
+            event_dict = {
+                "type": EventTypes.Redaction,
+                "content": content,
+                "room_id": room_id,
+                "sender": requester.user.to_string(),
+            }
+            if not room_version.updated_redaction_rules:
+                event_dict["redacts"] = event_id
+
+            event, _ = await self.event_creation_handler.create_and_send_nonmember_event(
+                requester, event_dict, txn_id=txn_id, check_auth=check_auth
+            )
+
+            if with_relations:
+                run_as_background_process(
+                    "redact_related_events",
+                    self._relation_handler.redact_events_related_to,
+                    requester=requester,
+                    event_id=event_id,
+                    initial_redaction_event=event,
+                    relation_types=with_relations,
                 )
 
-            # Event is not yet redacted, create a new event to redact it.
-            if event is None:
-                event_dict = {
-                    "type": EventTypes.Redaction,
-                    "content": content,
-                    "room_id": room_id,
-                    "sender": requester.user.to_string(),
-                }
-                # Earlier room versions had a top-level redacts property.
-                if not room_version.updated_redaction_rules:
-                    event_dict["redacts"] = event_id
-
-                (
-                    event,
-                    _,
-                ) = await self.event_creation_handler.create_and_send_nonmember_event(
-                    requester, event_dict, txn_id=txn_id
-                )
-
-                if with_relations:
-                    run_as_background_process(
-                        "redact_related_events",
-                        self._relation_handler.redact_events_related_to,
-                        requester=requester,
-                        event_id=event_id,
-                        initial_redaction_event=event,
-                        relation_types=with_relations,
-                    )
-
-            event_id = event.event_id
-        except ShadowBanError:
-            event_id = generate_fake_event_id()
-
-        set_tag("event_id", event_id)
-        return 200, {"event_id": event_id}
+        return event, event.event_id
 
     async def on_POST(
         self,
