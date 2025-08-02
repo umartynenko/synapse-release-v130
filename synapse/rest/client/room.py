@@ -29,23 +29,20 @@ from typing import TYPE_CHECKING, Awaitable, Dict, List, Optional, Tuple
 from urllib import parse as urlparse
 
 from prometheus_client.core import Histogram
-
 from twisted.web.server import Request
 
 from synapse import event_auth
-from synapse.api.constants import Direction, EventTypes, Membership, RoomCreationPreset
+from synapse.api.constants import Direction, EventTypes, Membership
 from synapse.api.errors import (
     AuthError,
     Codes,
     InvalidClientCredentialsError,
     MissingClientTokenError,
-    NotFoundError,
     ShadowBanError,
     SynapseError,
     UnredactedContentDeletedError,
 )
 from synapse.api.filtering import Filter
-from synapse.events import EventBase
 from synapse.events.utils import SerializeEventConfig, format_event_for_client_v2
 from synapse.http.server import HttpServer
 from synapse.http.servlet import (
@@ -74,14 +71,6 @@ from synapse.util.events import generate_fake_event_id
 from synapse.util.stringutils import parse_and_validate_server_name
 
 logger = logging.getLogger(__name__)
-
-try:
-    from synapse.util.roles_and_permissions import get_user_role, get_user_permissions
-except ImportError:
-    logger.warning(
-        "roles_and_permissions util not found, create_room check will be skipped.")
-    get_user_permissions = None
-    get_user_role = None
 
 if TYPE_CHECKING:
     from synapse.server import HomeServer
@@ -165,6 +154,7 @@ class RoomCreateRestServlet(TransactionRestServlet):
         self.hs = hs
         self._room_creation_handler = hs.get_room_creation_handler()
         self.auth = hs.get_auth()
+        self.role_handler = hs.get_role_handler()
 
     def register(self, http_server: HttpServer) -> None:
         PATTERNS = "/createRoom"
@@ -188,7 +178,6 @@ class RoomCreateRestServlet(TransactionRestServlet):
     ) -> Tuple[int, JsonDict]:
         has_subscriber_admin_permission = False
         user_config = self.get_room_config(request)
-
         initial_state = user_config.get("initial_state", [])
         parent_space_event = next(
             (s for s in initial_state if s.get("type") == "m.space.parent"), None)
@@ -208,15 +197,15 @@ class RoomCreateRestServlet(TransactionRestServlet):
                         space_id,
                     )
 
-        if get_user_permissions:
-            user_permissions = await get_user_permissions(self.hs,
-                                                          requester.user.to_string())
-
+        if self.role_handler.get_user_permissions:
+            user_permissions = await self.role_handler.get_user_permissions(
+                requester.user.to_string())
             if not has_subscriber_admin_permission and not user_permissions.get(
                 "create_room", False):
                 user_role = "unknown"
-                if get_user_role:
-                    user_role = await get_user_role(self.hs, requester.user.to_string())
+                if self.role_handler.get_user_role:
+                    user_role = await self.role_handler.get_user_role(
+                        requester.user.to_string())
 
                 logger.warning(
                     "User %s (role: %s) attempt to create a room denied. "
@@ -224,6 +213,7 @@ class RoomCreateRestServlet(TransactionRestServlet):
                     requester.user,
                     user_role,
                 )
+
                 raise SynapseError(403, "You do not have permission to create rooms.",
                                    errcode=Codes.FORBIDDEN)
 
@@ -238,7 +228,6 @@ class RoomCreateRestServlet(TransactionRestServlet):
         return user_supplied_config
 
 
-# TODO: Needs unit testing for generic events
 class RoomStateEventRestServlet(RestServlet):
     CATEGORY = "Event sending requests"
 
@@ -267,18 +256,21 @@ class RoomStateEventRestServlet(RestServlet):
             self.on_GET,
             self.__class__.__name__,
         )
+
         http_server.register_paths(
             "PUT",
             client_patterns(state_key, v1=True),
             self.on_PUT,
             self.__class__.__name__,
         )
+
         http_server.register_paths(
             "GET",
             client_patterns(no_state_key, v1=True),
             self.on_GET_no_state_key,
             self.__class__.__name__,
         )
+
         http_server.register_paths(
             "PUT",
             client_patterns(no_state_key, v1=True),
@@ -305,7 +297,6 @@ class RoomStateEventRestServlet(RestServlet):
         format = parse_string(
             request, "format", default="content", allowed_values=["content", "event"]
         )
-
         msg_handler = self.message_handler
         data = await msg_handler.get_room_data(
             requester=requester,
@@ -342,10 +333,12 @@ class RoomStateEventRestServlet(RestServlet):
         content = parse_json_object_from_request(request)
 
         origin_server_ts = None
+
         if requester.app_service:
             origin_server_ts = parse_integer(request, "ts")
 
         delay = _parse_request_delay(request, self._max_event_delay_ms)
+
         if delay is not None:
             delay_id = await self.delayed_events_handler.add(
                 requester,
@@ -388,7 +381,6 @@ class RoomStateEventRestServlet(RestServlet):
 
                 if origin_server_ts is not None:
                     event_dict["origin_server_ts"] = origin_server_ts
-
                 (
                     event,
                     _,
@@ -401,10 +393,10 @@ class RoomStateEventRestServlet(RestServlet):
 
         set_tag("event_id", event_id)
         ret = {"event_id": event_id}
+
         return 200, ret
 
 
-# TODO: Needs unit testing for generic events + feedback
 class RoomSendEventRestServlet(TransactionRestServlet):
     CATEGORY = "Event sending requests"
 
@@ -429,12 +421,13 @@ class RoomSendEventRestServlet(TransactionRestServlet):
         txn_id: Optional[str],
     ) -> Tuple[int, JsonDict]:
         content = parse_json_object_from_request(request)
-
         origin_server_ts = None
+
         if requester.app_service:
             origin_server_ts = parse_integer(request, "ts")
 
         delay = _parse_request_delay(request, self._max_event_delay_ms)
+
         if delay is not None:
             delay_id = await self.delayed_events_handler.add(
                 requester,
@@ -1138,7 +1131,6 @@ class RoomMembershipRestServlet(TransactionRestServlet):
         txn_id: Optional[str],
     ) -> Tuple[int, JsonDict]:
 
-        # <<< НАЧАЛО: НОВАЯ ГИБКАЯ ЛОГИКА ЗАПРЕТА >>>
         if membership_action == "leave":
             # Серверные администраторы могут выходить всегда.
             is_admin = await self.auth.is_server_admin(requester)
@@ -1148,7 +1140,6 @@ class RoomMembershipRestServlet(TransactionRestServlet):
             else:
                 # Для всех остальных пользователей применяем правило №2:
                 # Можно выйти, только если ты создатель комнаты.
-
                 # Получаем событие создания комнаты, чтобы узнать, кто создатель.
                 state_controller = self.hs.get_storage_controllers().state
                 create_event = await state_controller.get_current_state_event(
@@ -1176,7 +1167,6 @@ class RoomMembershipRestServlet(TransactionRestServlet):
                     raise AuthError(
                         403, "You can only leave rooms or spaces that you have created."
                     )
-        # <<< КОНЕЦ: НОВАЯ ГИБКАЯ ЛОГИКА ЗАПРЕТА >>>
 
         if requester.is_guest and membership_action not in {
             Membership.JOIN,
@@ -1280,6 +1270,7 @@ class RoomRedactEventRestServlet(TransactionRestServlet):
         self._store = hs.get_datastores().main
         self._relation_handler = hs.get_relations_handler()
         self._msc3912_enabled = hs.config.experimental.msc3912_enabled
+        self.role_handler = hs.get_role_handler()
 
     def register(self, http_server: HttpServer) -> None:
         PATTERNS = "/rooms/(?P<room_id>[^/]*)/redact/(?P<event_id>[^/]*)"
@@ -1294,12 +1285,11 @@ class RoomRedactEventRestServlet(TransactionRestServlet):
         txn_id: Optional[str],
     ) -> Tuple[int, JsonDict]:
 
-        # <<< НАЧАЛО: НОВАЯ, ПРОСТАЯ ЛОГИКА ПРОВЕРКИ ПРАВ >>>
         # Проверяем, импортирована ли наша система ролей.
-        if get_user_permissions:
+        if self.role_handler.get_user_permissions:
             # Получаем кастомные права пользователя.
-            permissions = await get_user_permissions(self.hs,
-                                                     requester.user.to_string())
+            permissions = await self.role_handler.get_user_permissions(
+                requester.user.to_string())
 
             # Если право 'delete_messages' явно установлено в False - запрещаем.
             if permissions.get("delete_messages", True) is False:
@@ -1308,11 +1298,9 @@ class RoomRedactEventRestServlet(TransactionRestServlet):
                     requester.user, event_id
                 )
                 raise AuthError(403, "You do not have permission to delete messages.")
-        # <<< КОНЕЦ: НОВАЯ, ПРОСТАЯ ЛОГИКА ПРОВЕРКИ ПРАВ >>>
 
         # Если проверка выше пройдена, позволяем стандартной логике Synapse
         # продолжить выполнение. Synapse сам проверит power_levels и т.д.
-
         content = parse_json_object_from_request(request)
 
         requester_suspended = await self._store.get_user_suspended_status(

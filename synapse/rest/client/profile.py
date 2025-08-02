@@ -21,10 +21,10 @@
 
 """This module contains REST servlets to do with profile: /profile/<paths>"""
 
-import re
 import logging
+import re
 from http import HTTPStatus
-from typing import TYPE_CHECKING, Tuple, Dict
+from typing import TYPE_CHECKING, Tuple
 
 from synapse.api.constants import ProfileFields
 from synapse.api.errors import Codes, SynapseError
@@ -39,7 +39,6 @@ from synapse.http.site import SynapseRequest
 from synapse.rest.client._base import client_patterns
 from synapse.types import JsonDict, JsonValue, UserID
 from synapse.util.stringutils import is_namedspaced_grammar
-from synapse.util.roles_and_permissions import get_user_role, get_user_permissions
 
 if TYPE_CHECKING:
     from synapse.server import HomeServer
@@ -52,12 +51,14 @@ def _read_propagate(hs: "HomeServer", request: SynapseRequest) -> bool:
     assert request.args is not None
 
     propagate = True
+
     if hs.config.experimental.msc4069_profile_inhibit_propagation:
         do_propagate = request.args.get(b"org.matrix.msc4069.propagate")
         if do_propagate is not None:
             propagate = parse_boolean(
                 request, "org.matrix.msc4069.propagate", default=False
             )
+
     return propagate
 
 
@@ -70,6 +71,7 @@ class ProfileDisplaynameRestServlet(RestServlet):
         self.hs = hs
         self.profile_handler = hs.get_profile_handler()
         self.auth = hs.get_auth()
+        self.role_handler = hs.get_role_handler()
 
     async def on_GET(
         self, request: SynapseRequest, user_id: str
@@ -86,11 +88,13 @@ class ProfileDisplaynameRestServlet(RestServlet):
             )
 
         user = UserID.from_string(user_id)
+
         await self.profile_handler.check_profile_query_allowed(user, requester_user)
 
         displayname = await self.profile_handler.get_displayname(user)
 
         ret = {}
+
         if displayname is not None:
             ret["displayname"] = displayname
 
@@ -107,10 +111,11 @@ class ProfileDisplaynameRestServlet(RestServlet):
         requester = await self.auth.get_user_by_req(request, allow_guest=True)
         user = UserID.from_string(user_id)
         is_admin = await self.auth.is_server_admin(requester)
-
-        requester_role = await get_user_role(self.hs, requester.user.to_string())
+        requester_role = await self.role_handler.get_user_role(
+            requester.user.to_string())
         requester_id = requester.user.to_string()
-        permissions = await get_user_permissions(self.hs, requester.user.to_string())
+        permissions = await self.role_handler.get_user_permissions(
+            requester.user.to_string())
 
         # Logging the request
         logger.info(
@@ -151,7 +156,6 @@ class ProfileDisplaynameRestServlet(RestServlet):
             )
 
         propagate = _read_propagate(self.hs, request)
-
         requester_suspended = (
             await self.hs.get_datastores().main.get_user_suspended_status(
                 requester.user.to_string()
@@ -181,6 +185,7 @@ class ProfileAvatarURLRestServlet(RestServlet):
         self.hs = hs
         self.profile_handler = hs.get_profile_handler()
         self.auth = hs.get_auth()
+        self.role_handler = hs.get_role_handler()
 
     async def on_GET(
         self, request: SynapseRequest, user_id: str
@@ -197,11 +202,13 @@ class ProfileAvatarURLRestServlet(RestServlet):
             )
 
         user = UserID.from_string(user_id)
+
         await self.profile_handler.check_profile_query_allowed(user, requester_user)
 
         avatar_url = await self.profile_handler.get_avatar_url(user)
 
         ret = {}
+
         if avatar_url is not None:
             ret["avatar_url"] = avatar_url
 
@@ -221,8 +228,8 @@ class ProfileAvatarURLRestServlet(RestServlet):
 
         # Obtaining user role and permissions
         requester_id = requester.user.to_string()
-        requester_role = await get_user_role(self.hs, requester_id)
-        permissions = await get_user_permissions(self.hs, requester_id)
+        requester_role = await self.role_handler.get_user_role(requester_id)
+        permissions = await self.role_handler.get_user_permissions(requester_id)
 
         # Logging the request
         logger.info(
@@ -231,7 +238,6 @@ class ProfileAvatarURLRestServlet(RestServlet):
             requester_role,
             user_id
         )
-
         logger.info(
             "User %s permissions: %s",
             requester_id,
@@ -251,6 +257,7 @@ class ProfileAvatarURLRestServlet(RestServlet):
             )
 
         content = parse_json_object_from_request(request)
+
         try:
             new_avatar_url = content["avatar_url"]
         except KeyError:
@@ -259,7 +266,6 @@ class ProfileAvatarURLRestServlet(RestServlet):
             )
 
         propagate = _read_propagate(self.hs, request)
-
         requester_suspended = (
             await self.hs.get_datastores().main.get_user_suspended_status(
                 requester.user.to_string()
@@ -305,6 +311,7 @@ class ProfileRestServlet(RestServlet):
             )
 
         user = UserID.from_string(user_id)
+
         await self.profile_handler.check_profile_query_allowed(user, requester_user)
 
         ret = await self.profile_handler.get_profile(user_id)
@@ -345,6 +352,7 @@ class UnstableProfileFieldRestServlet(RestServlet):
 
         if len(field_name.encode("utf-8")) > MAX_CUSTOM_FIELD_LEN:
             raise SynapseError(400, "Field name too long", errcode=Codes.KEY_TOO_LARGE)
+
         if not is_namedspaced_grammar(field_name):
             raise SynapseError(
                 400,
@@ -353,6 +361,7 @@ class UnstableProfileFieldRestServlet(RestServlet):
             )
 
         user = UserID.from_string(user_id)
+
         await self.profile_handler.check_profile_query_allowed(user, requester_user)
 
         if field_name == ProfileFields.DISPLAYNAME:
@@ -381,6 +390,7 @@ class UnstableProfileFieldRestServlet(RestServlet):
 
         if len(field_name.encode("utf-8")) > MAX_CUSTOM_FIELD_LEN:
             raise SynapseError(400, "Field name too long", errcode=Codes.KEY_TOO_LARGE)
+
         if not is_namedspaced_grammar(field_name):
             raise SynapseError(
                 400,
@@ -389,6 +399,7 @@ class UnstableProfileFieldRestServlet(RestServlet):
             )
 
         content = parse_json_object_from_request(request)
+
         try:
             new_value = content[field_name]
         except KeyError:
@@ -443,6 +454,7 @@ class UnstableProfileFieldRestServlet(RestServlet):
 
         if len(field_name.encode("utf-8")) > MAX_CUSTOM_FIELD_LEN:
             raise SynapseError(400, "Field name too long", errcode=Codes.KEY_TOO_LARGE)
+
         if not is_namedspaced_grammar(field_name):
             raise SynapseError(
                 400,
@@ -451,7 +463,6 @@ class UnstableProfileFieldRestServlet(RestServlet):
             )
 
         propagate = _read_propagate(self.hs, request)
-
         requester_suspended = (
             await self.hs.get_datastores().main.get_user_suspended_status(
                 requester.user.to_string()

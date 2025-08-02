@@ -119,6 +119,7 @@ from synapse.handlers.sync import SyncHandler
 from synapse.handlers.typing import FollowerTypingHandler, TypingWriterHandler
 from synapse.handlers.user_directory import UserDirectoryHandler
 from synapse.handlers.worker_lock import WorkerLocksHandler
+from synapse.util.roles_and_permissions import RoleHandler
 from synapse.http.client import (
     InsecureInterceptableContextFactory,
     ReplicationClient,
@@ -300,6 +301,7 @@ class HomeServer(metaclass=abc.ABCMeta):
         self._instance_name = config.worker.instance_name
 
         self.version_string = version_string
+        self.role_handler: Optional[RoleHandler] = None
 
         self.datastores: Optional[Databases] = None
 
@@ -365,6 +367,9 @@ class HomeServer(metaclass=abc.ABCMeta):
         # unless handlers are instantiated.
         if self.config.worker.run_background_tasks:
             self.setup_background_tasks()
+
+        self.role_handler = RoleHandler(self)
+
 
     def start_listening(self) -> None:  # noqa: B027 (no-op by design)
         """Start the HTTP, manhole, metrics, etc listeners
@@ -751,6 +756,13 @@ class HomeServer(metaclass=abc.ABCMeta):
     @cache_in_self
     def get_federation_registry(self) -> FederationHandlerRegistry:
         return FederationHandlerRegistry(self)
+
+    def get_role_handler(self) -> "RoleHandler":
+        """
+        Returns the handler for user roles and permissions.
+        """
+        assert self.role_handler is not None, "RoleHandler not initialized"
+        return self.role_handler
 
     @cache_in_self
     def get_server_notices_manager(self) -> ServerNoticesManager:
