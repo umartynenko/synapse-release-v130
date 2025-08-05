@@ -668,6 +668,12 @@ class RoomMemberHandler(metaclass=abc.ABCMeta):
         else:
             content = dict(content)
 
+        # <<< НАЧАЛО ИЗМЕНЕНИЯ 1/2 >>>
+        # Проверяем и извлекаем наш флаг из content.
+        # .pop() удобно извлекает и удаляет ключ, чтобы он не попал в само событие.
+        is_controlled_join = content.pop("dev.martynenko.controlled_join", False)
+        # <<< КОНЕЦ ИЗМЕНЕНИЯ 1/2 >>>
+
         is_requester_server_notices_user = (
             self._server_notices_mxid is not None
             and requester.user.to_string() == self._server_notices_mxid
@@ -1071,25 +1077,499 @@ class RoomMemberHandler(metaclass=abc.ABCMeta):
 
         assert event.internal_metadata.stream_ordering
 
-        # --- НАЧАЛО НОВОГО ФИНАЛЬНОГО БЛОКА ---
-        if event and event.membership == Membership.JOIN:
-            try:
-                # Определяем контекст точки входа
-                entry_join_rule = await self.store.get_room_join_rule(room_id)
-                await self._handle_hierarchical_join(
-                    room_id,
-                    event.state_key,
-                    entry_join_rule
-                )
-            except Exception:
-                logger.exception(
-                    "Failed during hierarchical auto-join for user %s starting from room %s",
-                    event.state_key,
-                    room_id,
-                )
-        # --- КОНЕЦ ИСПРАВЛЕННОГО БЛОКА ВЫЗОВА ---
+        # <<< НАЧАЛО ИЗМЕНЕНИЯ 2/2 >>>
+        # Весь стандартный блок [CONTEXT_JOIN] будет выполняться,
+        # ТОЛЬКО если наш флаг НЕ установлен.
+        if not is_controlled_join:
+            # --- НАЧАЛО НОВОГО ФИНАЛЬНОГО БЛОКА ---
+            if event and event.membership == Membership.JOIN:
+                try:
+                    # Определяем контекст точки входа
+                    entry_join_rule = await self.store.get_room_join_rule(room_id)
+                    await self._handle_hierarchical_join(
+                        room_id,
+                        event.state_key,
+                        entry_join_rule
+                    )
+                except Exception:
+                    logger.exception(
+                        "Failed during hierarchical auto-join for user %s starting from room %s",
+                        event.state_key,
+                        room_id,
+                    )
+            # --- КОНЕЦ ИСПРАВЛЕННОГО БЛОКА ВЫЗОВА ---
+        # <<< КОНЕЦ ИЗМЕНЕНИЯ 2/2 >>>
 
         return event.event_id, event.internal_metadata.stream_ordering
+
+    # async def update_membership_locked(
+    #     self,
+    #     requester: Requester,
+    #     target: UserID,
+    #     room_id: str,
+    #     action: str,
+    #     txn_id: Optional[str] = None,
+    #     remote_room_hosts: Optional[List[str]] = None,
+    #     third_party_signed: Optional[dict] = None,
+    #     ratelimit: bool = True,
+    #     content: Optional[dict] = None,
+    #     new_room: bool = False,
+    #     require_consent: bool = True,
+    #     outlier: bool = False,
+    #     allow_no_prev_events: bool = False,
+    #     prev_event_ids: Optional[List[str]] = None,
+    #     state_event_ids: Optional[List[str]] = None,
+    #     depth: Optional[int] = None,
+    #     origin_server_ts: Optional[int] = None,
+    #     force: bool = False,
+    # ) -> Tuple[str, int]:
+    #     """Helper for update_membership.
+    #
+    #     Assumes that the membership linearizer is already held for the room.
+    #     """
+    #
+    #     if action in (Membership.JOIN, Membership.INVITE, Membership.KNOCK):
+    #         try:
+    #             await _check_space_limits_recursive(self.store, room_id,
+    #                                                 target.to_string())
+    #         except SynapseError:
+    #             raise
+    #         except Exception as e:
+    #             logger.warning(
+    #                 "Error during recursive space limit check for user %s in room %s: %s",
+    #                 target.to_string(),
+    #                 room_id,
+    #                 e,
+    #             )
+    #
+    #     content_specified = bool(content)
+    #     if content is None:
+    #         content = {}
+    #     else:
+    #         content = dict(content)
+    #
+    #     is_requester_server_notices_user = (
+    #         self._server_notices_mxid is not None
+    #         and requester.user.to_string() == self._server_notices_mxid
+    #     )
+    #
+    #     requester_suspended = await self.store.get_user_suspended_status(
+    #         requester.user.to_string()
+    #     )
+    #     if action == Membership.INVITE and requester_suspended:
+    #         raise SynapseError(
+    #             403,
+    #             "Sending invites while account is suspended is not allowed.",
+    #             Codes.USER_ACCOUNT_SUSPENDED,
+    #         )
+    #
+    #     if target.to_string() != requester.user.to_string():
+    #         target_suspended = await self.store.get_user_suspended_status(
+    #             target.to_string()
+    #         )
+    #     else:
+    #         target_suspended = requester_suspended
+    #
+    #     if action == Membership.JOIN and target_suspended:
+    #         raise SynapseError(
+    #             403,
+    #             "Joining rooms while account is suspended is not allowed.",
+    #             Codes.USER_ACCOUNT_SUSPENDED,
+    #         )
+    #     if action == Membership.KNOCK and target_suspended:
+    #         raise SynapseError(
+    #             403,
+    #             "Knocking on rooms while account is suspended is not allowed.",
+    #             Codes.USER_ACCOUNT_SUSPENDED,
+    #         )
+    #
+    #     if (
+    #         not self.allow_per_room_profiles and not is_requester_server_notices_user
+    #     ) or requester.shadow_banned:
+    #         content.pop("displayname", None)
+    #         content.pop("avatar_url", None)
+    #
+    #     if len(content.get("displayname") or "") > MAX_DISPLAYNAME_LEN:
+    #         raise SynapseError(
+    #             400,
+    #             f"Displayname is too long (max {MAX_DISPLAYNAME_LEN})",
+    #             errcode=Codes.BAD_JSON,
+    #         )
+    #
+    #     if len(content.get("avatar_url") or "") > MAX_AVATAR_URL_LEN:
+    #         raise SynapseError(
+    #             400,
+    #             f"Avatar URL is too long (max {MAX_AVATAR_URL_LEN})",
+    #             errcode=Codes.BAD_JSON,
+    #         )
+    #
+    #     if "avatar_url" in content and content.get("avatar_url") is not None:
+    #         if not await self.profile_handler.check_avatar_size_and_mime_type(
+    #             content["avatar_url"],
+    #         ):
+    #             raise SynapseError(403, "This avatar is not allowed", Codes.FORBIDDEN)
+    #
+    #     content.pop(EventContentFields.AUTHORISING_USER, None)
+    #
+    #     effective_membership_state = action
+    #     if action in ["kick", "unban"]:
+    #         effective_membership_state = "leave"
+    #
+    #     if effective_membership_state not in Membership.LIST:
+    #         raise SynapseError(400, "Invalid membership key")
+    #
+    #     if (
+    #         effective_membership_state
+    #         in self._membership_types_to_include_profile_data_in
+    #     ):
+    #         profile = self.profile_handler
+    #
+    #         try:
+    #             if "displayname" not in content:
+    #                 displayname = await profile.get_displayname(target)
+    #                 if displayname is not None:
+    #                     content["displayname"] = displayname
+    #             if "avatar_url" not in content:
+    #                 avatar_url = await profile.get_avatar_url(target)
+    #                 if avatar_url is not None:
+    #                     content["avatar_url"] = avatar_url
+    #         except Exception as e:
+    #             logger.info("Failed to get profile information for %r: %s", target, e)
+    #
+    #     if third_party_signed is not None:
+    #         await self.federation_handler.exchange_third_party_invite(
+    #             third_party_signed["sender"],
+    #             target.to_string(),
+    #             room_id,
+    #             third_party_signed,
+    #         )
+    #
+    #     if not remote_room_hosts:
+    #         remote_room_hosts = []
+    #
+    #     if not force:
+    #         if effective_membership_state not in ("leave", "ban"):
+    #             is_blocked = await self.store.is_room_blocked(room_id)
+    #             if is_blocked:
+    #                 raise SynapseError(403, "This room has been blocked on this server")
+    #
+    #         if effective_membership_state == Membership.INVITE:
+    #             target_id = target.to_string()
+    #
+    #             if target_id == self._server_notices_mxid:
+    #                 raise SynapseError(HTTPStatus.FORBIDDEN, "Cannot invite this user")
+    #
+    #             block_invite_result = None
+    #
+    #             if (
+    #                 self._server_notices_mxid is not None
+    #                 and requester.user.to_string() == self._server_notices_mxid
+    #             ):
+    #                 is_requester_admin = True
+    #             else:
+    #                 is_requester_admin = await self.auth.is_server_admin(requester)
+    #
+    #             if not is_requester_admin:
+    #                 if self.config.server.block_non_admin_invites:
+    #                     logger.info(
+    #                         "Blocking invite: user is not admin and non-admin "
+    #                         "invites disabled"
+    #                     )
+    #                     block_invite_result = (Codes.FORBIDDEN, {})
+    #
+    #                 spam_check = await self._spam_checker_module_callbacks.user_may_invite(
+    #                     requester.user.to_string(), target_id, room_id
+    #                 )
+    #                 if spam_check != self._spam_checker_module_callbacks.NOT_SPAM:
+    #                     logger.info("Blocking invite due to spam checker")
+    #                     block_invite_result = spam_check
+    #
+    #             if block_invite_result is not None:
+    #                 raise SynapseError(
+    #                     403,
+    #                     "Invites have been disabled on this server",
+    #                     errcode=block_invite_result[0],
+    #                     additional_fields=block_invite_result[1],
+    #                 )
+    #
+    #     if prev_event_ids is not None:
+    #         event, _ = await self._local_membership_update(
+    #             requester=requester,
+    #             target=target,
+    #             room_id=room_id,
+    #             membership=effective_membership_state,
+    #             txn_id=txn_id,
+    #             ratelimit=ratelimit,
+    #             allow_no_prev_events=allow_no_prev_events,
+    #             prev_event_ids=prev_event_ids,
+    #             state_event_ids=state_event_ids,
+    #             depth=depth,
+    #             content=content,
+    #             require_consent=require_consent,
+    #             outlier=outlier,
+    #             origin_server_ts=origin_server_ts,
+    #         )
+    #         assert event.internal_metadata.stream_ordering is not None
+    #         return event.event_id, event.internal_metadata.stream_ordering
+    #
+    #     latest_event_ids = await self.store.get_prev_events_for_room(room_id)
+    #
+    #     is_partial_state_room = await self.store.is_partial_state_room(room_id)
+    #     partial_state_before_join = await self.state_handler.compute_state_after_events(
+    #         room_id, latest_event_ids, await_full_state=False
+    #     )
+    #
+    #     is_host_in_room = await self._is_host_in_room(partial_state_before_join)
+    #
+    #     if is_host_in_room and not force:
+    #         old_state_id = partial_state_before_join.get(
+    #             (EventTypes.Member, target.to_string())
+    #         )
+    #
+    #         if old_state_id:
+    #             old_state = await self.store.get_event(old_state_id, allow_none=True)
+    #             old_membership = (
+    #                 old_state.content.get("membership") if old_state else None
+    #             )
+    #             if action == "unban" and old_membership != "ban":
+    #                 raise SynapseError(
+    #                     403,
+    #                     "Cannot unban user who was not banned"
+    #                     " (membership=%s)" % old_membership,
+    #                     errcode=Codes.BAD_STATE,
+    #                 )
+    #             if old_membership == "ban" and action not in ["ban", "unban", "leave"]:
+    #                 raise SynapseError(
+    #                     403,
+    #                     "Cannot %s user who was banned" % (action,),
+    #                     errcode=Codes.BAD_STATE,
+    #                 )
+    #
+    #             if old_state:
+    #                 same_content = content == old_state.content
+    #                 same_membership = old_membership == effective_membership_state
+    #                 same_sender = requester.user.to_string() == old_state.sender
+    #                 if same_sender and same_membership and same_content:
+    #                     assert old_state.internal_metadata.stream_ordering
+    #                     return (
+    #                         old_state.event_id,
+    #                         old_state.internal_metadata.stream_ordering,
+    #                     )
+    #
+    #             if old_membership in ["ban", "leave"] and action == "kick":
+    #                 raise AuthError(403, "The target user is not in the room")
+    #
+    #             if (
+    #                 old_membership == Membership.INVITE
+    #                 and effective_membership_state == Membership.LEAVE
+    #             ):
+    #                 is_blocked = await self.store.is_server_notice_room(room_id)
+    #                 if is_blocked:
+    #                     raise SynapseError(
+    #                         HTTPStatus.FORBIDDEN,
+    #                         "You cannot reject this invite",
+    #                         errcode=Codes.CANNOT_LEAVE_SERVER_NOTICE_ROOM,
+    #                     )
+    #         else:
+    #             if action == "kick":
+    #                 raise AuthError(403, "The target user is not in the room")
+    #
+    #     if effective_membership_state == Membership.JOIN and not force:
+    #         if requester.is_guest:
+    #             guest_can_join = await self._can_guest_join(partial_state_before_join)
+    #             if not guest_can_join:
+    #                 raise AuthError(403, "Guest access not allowed")
+    #
+    #         if (
+    #             self._server_notices_mxid is not None
+    #             and requester.user.to_string() == self._server_notices_mxid
+    #         ):
+    #             bypass_spam_checker = True
+    #         else:
+    #             bypass_spam_checker = await self.auth.is_server_admin(requester)
+    #
+    #         inviter = await self._get_inviter(target.to_string(), room_id)
+    #         if (
+    #             not bypass_spam_checker
+    #             and not new_room
+    #         ):
+    #             spam_check = (
+    #                 await self._spam_checker_module_callbacks.user_may_join_room(
+    #                     target.to_string(), room_id, is_invited=inviter is not None
+    #                 )
+    #             )
+    #             if spam_check != self._spam_checker_module_callbacks.NOT_SPAM:
+    #                 raise SynapseError(
+    #                     403,
+    #                     "Not allowed to join this room",
+    #                     errcode=spam_check[0],
+    #                     additional_fields=spam_check[1],
+    #                 )
+    #
+    #         remote_join, remote_room_hosts = await self._should_perform_remote_join(
+    #             target.to_string(),
+    #             room_id,
+    #             remote_room_hosts,
+    #             content,
+    #             is_partial_state_room,
+    #             is_host_in_room,
+    #             partial_state_before_join,
+    #         )
+    #         if remote_join:
+    #             if ratelimit:
+    #                 await self._join_rate_limiter_remote.ratelimit(
+    #                     requester,
+    #                 )
+    #                 await self._join_rate_per_room_limiter.ratelimit(
+    #                     requester,
+    #                     key=room_id,
+    #                     update=False,
+    #                 )
+    #
+    #             inviter = await self._get_inviter(target.to_string(), room_id)
+    #             if inviter and not self.hs.is_mine(inviter):
+    #                 remote_room_hosts.append(inviter.domain)
+    #
+    #             content["membership"] = Membership.JOIN
+    #
+    #             try:
+    #                 profile = self.profile_handler
+    #                 if not content_specified:
+    #                     content["displayname"] = await profile.get_displayname(target)
+    #                     content["avatar_url"] = await profile.get_avatar_url(target)
+    #             except Exception as e:
+    #                 logger.info(
+    #                     "Failed to get profile information while processing remote join for %r: %s",
+    #                     target,
+    #                     e,
+    #                 )
+    #
+    #             if requester.is_guest:
+    #                 content["kind"] = "guest"
+    #
+    #             remote_join_response = await self._remote_join(
+    #                 requester, remote_room_hosts, room_id, target, content
+    #             )
+    #
+    #             return remote_join_response
+    #
+    #     elif effective_membership_state == Membership.LEAVE and not force:
+    #         if not is_host_in_room:
+    #             (
+    #                 current_membership_type,
+    #                 current_membership_event_id,
+    #             ) = await self.store.get_local_current_membership_for_user_in_room(
+    #                 target.to_string(), room_id
+    #             )
+    #             if not current_membership_type or not current_membership_event_id:
+    #                 logger.info(
+    #                     "%s sent a leave request to %s, but that is not an active room "
+    #                     "on this server, or there is no pending invite or knock",
+    #                     target,
+    #                     room_id,
+    #                 )
+    #
+    #                 raise SynapseError(404, "Not a known room")
+    #
+    #             if current_membership_type == Membership.INVITE:
+    #                 invite = await self.store.get_event(current_membership_event_id)
+    #                 logger.info(
+    #                     "%s rejects invite to %s from %s",
+    #                     target,
+    #                     room_id,
+    #                     invite.sender,
+    #                 )
+    #
+    #                 if not self.hs.is_mine_id(invite.sender):
+    #                     return await self.remote_reject_invite(
+    #                         invite.event_id,
+    #                         txn_id,
+    #                         requester,
+    #                         content,
+    #                     )
+    #
+    #                 if len(latest_event_ids) == 0:
+    #                     latest_event_ids = [invite.event_id]
+    #
+    #             elif current_membership_type == Membership.KNOCK:
+    #                 knock = await self.store.get_event(current_membership_event_id)
+    #                 return await self.remote_rescind_knock(
+    #                     knock.event_id, txn_id, requester, content
+    #                 )
+    #
+    #     elif effective_membership_state == Membership.KNOCK and not force:
+    #         if not is_host_in_room:
+    #             remote_room_hosts.append(get_domain_from_id(room_id))
+    #
+    #             content["membership"] = Membership.KNOCK
+    #
+    #             try:
+    #                 profile = self.profile_handler
+    #                 if "displayname" not in content:
+    #                     content["displayname"] = await profile.get_displayname(target)
+    #                 if "avatar_url" not in content:
+    #                     content["avatar_url"] = await profile.get_avatar_url(target)
+    #             except Exception as e:
+    #                 logger.info(
+    #                     "Failed to get profile information while processing remote knock for %r: %s",
+    #                     target,
+    #                     e,
+    #                 )
+    #
+    #             return await self.remote_knock(
+    #                 requester, remote_room_hosts, room_id, target, content
+    #             )
+    #
+    #     event, context = await self._local_membership_update(
+    #         requester=requester,
+    #         target=target,
+    #         room_id=room_id,
+    #         membership=effective_membership_state,
+    #         txn_id=txn_id,
+    #         ratelimit=ratelimit,
+    #         prev_event_ids=latest_event_ids,
+    #         state_event_ids=state_event_ids,
+    #         depth=depth,
+    #         content=content,
+    #         require_consent=require_consent,
+    #         outlier=outlier,
+    #         origin_server_ts=origin_server_ts,
+    #     )
+    #
+    #     if effective_membership_state == Membership.INVITE and not force:
+    #         # Автоматически принять приглашение
+    #         self.hs.get_clock().call_later(
+    #             0.1,
+    #             lambda: run_as_background_process(
+    #                 "auto_accept_invite",
+    #                 self._handle_auto_accept_invite,
+    #                 room_id,
+    #                 target.to_string(),
+    #                 event.event_id,
+    #             )
+    #         )
+    #
+    #     assert event.internal_metadata.stream_ordering
+    #
+    #     # --- НАЧАЛО НОВОГО ФИНАЛЬНОГО БЛОКА ---
+    #     if event and event.membership == Membership.JOIN:
+    #         try:
+    #             # Определяем контекст точки входа
+    #             entry_join_rule = await self.store.get_room_join_rule(room_id)
+    #             await self._handle_hierarchical_join(
+    #                 room_id,
+    #                 event.state_key,
+    #                 entry_join_rule
+    #             )
+    #         except Exception:
+    #             logger.exception(
+    #                 "Failed during hierarchical auto-join for user %s starting from room %s",
+    #                 event.state_key,
+    #                 room_id,
+    #             )
+    #     # --- КОНЕЦ ИСПРАВЛЕННОГО БЛОКА ВЫЗОВА ---
+    #
+    #     return event.event_id, event.internal_metadata.stream_ordering
 
     async def _perform_auto_join(
         self,

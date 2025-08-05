@@ -901,26 +901,6 @@ class RoomCreationHandler:
             room_version=room_version,
         )
 
-        # Получаем кастомные поля из `creation_content`
-        creation_content = config.get("creation_content", {})
-        max_users = creation_content.get("custom.max_users")
-        max_chats = creation_content.get("custom.max_chats")
-
-        # Получаем тип комнаты из корня конфига, как мы его передаем с фронта
-        room_type = config.get("room_type")
-
-        # Если создается "Пространство Группа" и лимиты указаны, записываем их в БД
-        if room_type == "group" and (max_users is not None or max_chats is not None):
-            logger.info(
-                f"Установка лимитов для пространства-группы '{room_id}': "
-                f"max_users={max_users}, max_chats={max_chats}"
-            )
-            await self.hs.get_datastores().main.set_room_limits(
-                room_id=room_id,
-                max_users=max_users,
-                max_chats=max_chats,
-            )
-
         # Check whether this visibility value is blocked by a third party module
         allowed_by_third_party_rules = await (
             self._third_party_event_rules.check_visibility_can_be_modified(
@@ -1042,23 +1022,18 @@ class RoomCreationHandler:
 
         # ==============================================================================
         # Author: Uriy Martynenko
-        # Date: 26.05.2025
+        # Date: 05.08.2025
         #
         # --- ЛОГИКА ---
         # 1. Этот блок срабатывает только если создаваемая комната является
-        #    пространством (имеет тип `m.space`).
-        # 2. Он автоматически создает две дочерние комнаты (чаты):
-        #    - Публичный чат с названием "{Имя пространства} - Общий".
-        #    - Приватный чат с названием "{Имя пространства} - Приватный".
-        # 3. Обе дочерние комнаты создаются от имени того же пользователя (`requester`),
-        #    который создал родительское пространство. Это гарантирует, что он
-        #    автоматически становится их участником без необходимости приглашений.
-        # 4. После создания чаты привязываются к родительскому пространству
-        #    с помощью события `m.space.child`.
-        # 5. Для передачи ID созданных чатов на фронтенд используется "хак":
-        #    ID добавляются в возвращаемый `room_alias` через разделитель `|`.
-        #    Фронтенд-часть (dataProvider) знает об этом и парсит эту строку.
+        #    пространством определенного типа (department, group).
+        # 2. Он автоматически создает две дочерние комнаты (чаты): ОЧ и ЗЧ.
+        # 3. В `creation_content` каждого чата добавляется кастомный объект `custom`
+        #    с полями `room_category` и `chat_type` для последующей идентификации.
+        # 4. В каждый чат добавляется кастомное событие состояния `dev.martynenko.parent_space`,
+        #    которое содержит ID родительского пространства. Это "цифровая метка".
         # ==============================================================================
+        room_type = config.get("room_type")
         if (creation_content.get(EventContentFields.ROOM_TYPE) == RoomTypes.SPACE
             and room_type in ["department", "group"]):
             logger.info(
@@ -1067,14 +1042,25 @@ class RoomCreationHandler:
             try:
                 space_name = config.get("name", "Новое пространство")
 
-                async def _create_child_room_and_join(name: str, preset: str, chat_type: str) -> str:
-                    """Создает дочернюю комнату и возвращает ее ID."""
+                # <<< НАЧАЛО ОБЪЕДИНЕННОЙ ЛОГИКИ >>>
+                async def _create_child_room_and_join(name: str, preset: str,
+                                                      chat_type: str) -> str:
+                    """Создает дочернюю комнату, привязывает ее и помечает родителя."""
+
+                    # 1. Формируем кастомные поля (из моего кода)
+                    custom_fields = {
+                        "room_category": "chat",
+                        "chat_type": chat_type
+                    }
+
+                    # 2. Формируем конфиг комнаты, добавляя `custom` поля в `creation_content`
                     child_room_config = {
                         "preset": preset,
                         "name": name,
                         "creation_content": {
-                            "custom.room_category": "chat",
-                            "custom.chat_type": chat_type
+                            "custom.room_category": "chat", # <-- Это было в вашем коде, но
+                            "custom.chat_type": chat_type,  # <-- Synapse лучше работает с вложенным объектом
+                            "custom": custom_fields
                         }
                     }
 
@@ -1083,29 +1069,40 @@ class RoomCreationHandler:
                         config=child_room_config,
                         ratelimit=False
                     )
-
                     logger.info(
                         f"Для пространства '{room_id}' создана дочерняя комната '{child_room_id}'")
 
+                    # 3. Привязываем чат к пространству (стандартно)
                     await self.event_creation_handler.create_and_send_nonmember_event(
                         requester=requester,
                         event_dict={
-                            "type": EventTypes.SpaceChild,
-                            "state_key": child_room_id,
-                            "room_id": room_id,
-                            "sender": requester.user.to_string(),
-                            "content": {
-                                "via": [self.hs.hostname],
-                                "suggested": True,
-                            },
+                            "type": EventTypes.SpaceChild, "state_key": child_room_id,
+                            "room_id": room_id, "sender": requester.user.to_string(),
+                            "content": {"via": [self.hs.hostname], "suggested": True},
                         },
                         ratelimit=False,
                     )
                     logger.info(
                         f"Комната '{child_room_id}' привязана к пространству '{room_id}'")
+
+                    # 4. Добавляем "цифровую метку" (из моего кода)
+                    await self.event_creation_handler.create_and_send_nonmember_event(
+                        requester=requester,
+                        event_dict={
+                            "type": "dev.martynenko.parent_space", "state_key": "",
+                            "room_id": child_room_id,
+                            "sender": requester.user.to_string(),
+                            "content": {"space_id": room_id},
+                        },
+                        ratelimit=False,
+                    )
+                    logger.info(
+                        f"Комната '{child_room_id}' помечена родителем '{room_id}'")
+
                     return child_room_id
 
-                # Создаем публичный чат. requester автоматически присоединится.
+                # 5. Вызываем функцию с правильными именами (из ВАШЕГО кода)
+                # Создаем публичный чат
                 await _create_child_room_and_join(
                     name=f"{space_name} - ОЧ",
                     preset=RoomCreationPreset.PUBLIC_CHAT,
@@ -1118,25 +1115,18 @@ class RoomCreationHandler:
                     preset=RoomCreationPreset.PRIVATE_CHAT,
                     chat_type="private_chat",
                 )
+                # <<< КОНЕЦ ОБЪЕДИНЕННОЙ ЛОГИКИ >>>
 
-                # Даже если комната была создана с правилом "invite",
-                # мы принудительно заставляем пользователя присоединиться.
-                # `update_membership` справится с этим, изменив состояние с "invite" на "join".
-                # Это действие выполняется от имени самого пользователя (`requester`).
                 await self.room_member_handler.update_membership(
-                    requester=requester,
-                    target=requester.user,
-                    room_id=private_chat_id,
-                    action="join",
-                    ratelimit=False,
+                    requester=requester, target=requester.user,
+                    room_id=private_chat_id, action="join", ratelimit=False,
                 )
                 logger.info(
                     f"Пользователь {requester.user} принудительно присоединен к приватной комнате {private_chat_id}")
 
             except Exception as e:
                 logger.error(
-                    f"Не удалось автоматически создать дочерние комнаты для пространства '{room_id}': {e}"
-                )
+                    f"Не удалось автоматически создать дочерние комнаты для пространства '{room_id}': {e}")
 
         return room_id, room_alias, last_stream_id
 

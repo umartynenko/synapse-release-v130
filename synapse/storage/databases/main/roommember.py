@@ -78,7 +78,6 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-
 _MEMBERSHIP_PROFILE_UPDATE_NAME = "room_membership_profile_update"
 _CURRENT_STATE_MEMBERSHIP_UPDATE_NAME = "current_state_events_membership"
 _POPULATE_PARTICIPANT_BG_UPDATE_BATCH_SIZE = 1000
@@ -135,20 +134,22 @@ class RoomMemberWorkerStore(EventsWorkerStore, CacheInvalidationWorkerStore):
         def _transact(txn: LoggingTransaction) -> int:
             if isinstance(self.database_engine, Sqlite3Engine):
                 query = """
-                    SELECT COUNT(DISTINCT substr(out.user_id, pos+1))
-                    FROM (
-                        SELECT rm.user_id as user_id, instr(rm.user_id, ':')
-                            AS pos FROM room_memberships as rm
-                        INNER JOIN current_state_events as c ON rm.event_id = c.event_id
-                        WHERE c.type = 'm.room.member'
-                    ) as out
-                """
+                        SELECT COUNT(DISTINCT substr(out.user_id, pos + 1))
+                        FROM (SELECT rm.user_id as user_id,
+                                     instr(rm.user_id, ':')
+                                                AS pos
+                              FROM room_memberships as rm
+                                       INNER JOIN current_state_events as c
+                                                  ON rm.event_id = c.event_id
+                              WHERE c.type = 'm.room.member') as out \
+                        """
             else:
                 query = """
-                    SELECT COUNT(DISTINCT split_part(state_key, ':', 2))
-                    FROM current_state_events
-                    WHERE type = 'm.room.member' AND membership = 'join';
-                """
+                        SELECT COUNT(DISTINCT split_part(state_key, ':', 2))
+                        FROM current_state_events
+                        WHERE type = 'm.room.member'
+                          AND membership = 'join'; \
+                        """
             txn.execute(query)
             return list(txn)[0][0]
 
@@ -271,13 +272,16 @@ class RoomMemberWorkerStore(EventsWorkerStore, CacheInvalidationWorkerStore):
             txn: LoggingTransaction,
         ) -> Dict[str, ProfileInfo]:
             sql = """
-                SELECT state_key, display_name, avatar_url FROM room_memberships as m
-                INNER JOIN current_state_events as c
-                ON m.event_id = c.event_id
-                AND m.room_id = c.room_id
-                AND m.user_id = c.state_key
-                WHERE c.type = 'm.room.member' AND c.room_id = ? AND m.membership = ?
-            """
+                  SELECT state_key, display_name, avatar_url
+                  FROM room_memberships as m
+                           INNER JOIN current_state_events as c
+                                      ON m.event_id = c.event_id
+                                          AND m.room_id = c.room_id
+                                          AND m.user_id = c.state_key
+                  WHERE c.type = 'm.room.member'
+                    AND c.room_id = ?
+                    AND m.membership = ? \
+                  """
             txn.execute(sql, (room_id, Membership.JOIN))
 
             return {r[0]: ProfileInfo(display_name=r[1], avatar_url=r[2]) for r in txn}
@@ -329,15 +333,18 @@ class RoomMemberWorkerStore(EventsWorkerStore, CacheInvalidationWorkerStore):
             # Note: rejected events will have a null membership field, so we we manually
             # filter them out.
             sql = """
-                SELECT state_key, membership, event_id
-                FROM current_state_events
-                WHERE type = 'm.room.member' AND room_id = ?
+                  SELECT state_key, membership, event_id
+                  FROM current_state_events
+                  WHERE type = 'm.room.member'
+                    AND room_id = ?
                     AND membership IS NOT NULL
-                ORDER BY
-                    CASE membership WHEN ? THEN 1 WHEN ? THEN 2 WHEN ? THEN 3 ELSE 4 END ASC,
-                    event_stream_ordering ASC
-                LIMIT ?
-            """
+                  ORDER BY CASE membership
+                               WHEN ? THEN 1
+                               WHEN ? THEN 2
+                               WHEN ? THEN 3
+                               ELSE 4 END ASC,
+                           event_stream_ordering ASC LIMIT ? \
+                  """
 
             txn.execute(
                 sql,
@@ -380,11 +387,13 @@ class RoomMemberWorkerStore(EventsWorkerStore, CacheInvalidationWorkerStore):
         # Note, rejected events will have a null membership field, so
         # we we manually filter them out.
         sql = """
-            SELECT count(*), membership FROM current_state_events
-            WHERE type = 'm.room.member' AND room_id = ?
+              SELECT count(*), membership
+              FROM current_state_events
+              WHERE type = 'm.room.member'
+                AND room_id = ?
                 AND membership IS NOT NULL
-            GROUP BY membership
-        """
+              GROUP BY membership \
+              """
 
         txn.execute(sql, (room_id,))
         return {membership: count for count, membership in txn}
@@ -566,7 +575,9 @@ class RoomMemberWorkerStore(EventsWorkerStore, CacheInvalidationWorkerStore):
                 ),
                 room_version_id=room_version,
             )
-            for room_id, sender, membership, event_id, instance_name, stream_ordering, room_version in txn
+            for
+            room_id, sender, membership, event_id, instance_name, stream_ordering, room_version
+            in txn
         ]
 
         return results
@@ -698,13 +709,13 @@ class RoomMemberWorkerStore(EventsWorkerStore, CacheInvalidationWorkerStore):
             return set()
 
         sql = """
-            SELECT state_key FROM current_state_events
-            WHERE
-                type = 'm.room.member'
+              SELECT state_key
+              FROM current_state_events
+              WHERE type = 'm.room.member'
                 AND membership = 'join'
                 AND %s
-            GROUP BY state_key
-        """
+              GROUP BY state_key \
+              """
 
         clause, args = make_in_list_sql_clause(
             self.database_engine, "state_key", user_ids
@@ -1078,13 +1089,13 @@ class RoomMemberWorkerStore(EventsWorkerStore, CacheInvalidationWorkerStore):
             raise Exception("Invalid host name")
 
         sql = """
-            SELECT state_key FROM current_state_events
-            WHERE membership = ?
+              SELECT state_key
+              FROM current_state_events
+              WHERE membership = ?
                 AND type = 'm.room.member'
                 AND room_id = ?
-                AND state_key LIKE ?
-            LIMIT 1
-        """
+                AND state_key LIKE ? LIMIT 1 \
+              """
 
         # We do need to be careful to ensure that host doesn't have any wild cards
         # in it, but we checked above for known ones and we'll check below that
@@ -1128,13 +1139,12 @@ class RoomMemberWorkerStore(EventsWorkerStore, CacheInvalidationWorkerStore):
 
         def get_current_hosts_in_room_txn(txn: LoggingTransaction) -> Set[str]:
             sql = """
-                SELECT DISTINCT substring(state_key FROM '@[^:]*:(.*)$')
-                FROM current_state_events
-                WHERE
-                    type = 'm.room.member'
+                  SELECT DISTINCT substring(state_key FROM '@[^:]*:(.*)$')
+                  FROM current_state_events
+                  WHERE type = 'm.room.member'
                     AND membership = 'join'
-                    AND room_id = ?
-            """
+                    AND room_id = ? \
+                  """
             txn.execute(sql, (room_id,))
             return {d for (d,) in txn}
 
@@ -1186,22 +1196,22 @@ class RoomMemberWorkerStore(EventsWorkerStore, CacheInvalidationWorkerStore):
             # longest is good because they're most likely to have anything we
             # ask about.
             sql = """
-                SELECT
-                    /* Match the domain part of the MXID */
-                    substring(c.state_key FROM '@[^:]*:(.*)$') as server_domain
-                FROM current_state_events c
-                /* Get the depth of the event from the events table */
-                INNER JOIN events AS e USING (event_id)
-                WHERE
-                    /* Find any join state events in the room */
-                    c.type = 'm.room.member'
+                  SELECT
+                      /* Match the domain part of the MXID */
+                      substring(c.state_key FROM '@[^:]*:(.*)$') as server_domain
+                  FROM current_state_events c
+                           /* Get the depth of the event from the events table */
+                           INNER JOIN events AS e USING (event_id)
+                  WHERE
+                      /* Find any join state events in the room */
+                      c.type = 'm.room.member'
                     AND c.membership = 'join'
                     AND c.room_id = ?
-                /* Group all state events from the same domain into their own buckets (groups) */
-                GROUP BY server_domain
-                /* Sorted by lowest depth first */
-                ORDER BY min(e.depth) ASC;
-            """
+                  /* Group all state events from the same domain into their own buckets (groups) */
+                  GROUP BY server_domain
+                  /* Sorted by lowest depth first */
+                  ORDER BY min(e.depth) ASC; \
+                  """
             txn.execute(sql, (room_id,))
             # `server_domain` will be `NULL` for malformed MXIDs with no colons.
             return tuple(d for (d,) in txn if d is not None)
@@ -1287,14 +1297,16 @@ class RoomMemberWorkerStore(EventsWorkerStore, CacheInvalidationWorkerStore):
             # when a user forgets a room we update all rows for that user and
             # room, not just the current one).
             sql = """
-                SELECT room_id, (
-                    SELECT count(*) FROM room_memberships
-                    WHERE room_id = m.room_id AND user_id = m.user_id AND forgotten = 0
-                ) AS count
-                FROM room_memberships AS m
-                WHERE user_id = ? AND forgotten = 1
-                GROUP BY room_id, user_id;
-            """
+                  SELECT room_id,
+                         (SELECT count(*)
+                          FROM room_memberships
+                          WHERE room_id = m.room_id
+                            AND user_id = m.user_id
+                            AND forgotten = 0) AS count
+                  FROM room_memberships AS m
+                  WHERE user_id = ? AND forgotten = 1
+                  GROUP BY room_id, user_id; \
+                  """
             txn.execute(sql, (user_id,))
             return {row[0] for row in txn if row[1] == 0}
 
@@ -1313,12 +1325,12 @@ class RoomMemberWorkerStore(EventsWorkerStore, CacheInvalidationWorkerStore):
         """
 
         sql = """
-            SELECT count(*) > 0 FROM local_current_membership
-            INNER JOIN room_memberships USING (room_id, event_id)
-            WHERE
-                room_id = ?
-                AND forgotten = 0;
-        """
+              SELECT count(*) > 0
+              FROM local_current_membership
+                       INNER JOIN room_memberships USING (room_id, event_id)
+              WHERE room_id = ?
+                AND forgotten = 0; \
+              """
 
         rows = await self.db_pool.execute("is_forgotten_room", sql, room_id)
 
@@ -1517,19 +1529,24 @@ class RoomMemberWorkerStore(EventsWorkerStore, CacheInvalidationWorkerStore):
             # `get_sliding_sync_rooms_for_user_from_membership_snapshots` cache in the
             # appropriate places (and add tests).
             sql = """
-                SELECT m.room_id, m.sender, m.membership, m.membership_event_id,
-                    r.room_version,
-                    m.event_instance_name, m.event_stream_ordering,
-                    m.has_known_state,
-                    COALESCE(j.room_type, m.room_type),
-                    COALESCE(j.is_encrypted, m.is_encrypted)
-                FROM sliding_sync_membership_snapshots AS m
-                INNER JOIN rooms AS r USING (room_id)
-                LEFT JOIN sliding_sync_joined_rooms AS j ON (j.room_id = m.room_id AND m.membership = 'join')
-                WHERE user_id = ?
+                  SELECT m.room_id,
+                         m.sender,
+                         m.membership,
+                         m.membership_event_id,
+                         r.room_version,
+                         m.event_instance_name,
+                         m.event_stream_ordering,
+                         m.has_known_state,
+                         COALESCE(j.room_type, m.room_type),
+                         COALESCE(j.is_encrypted, m.is_encrypted)
+                  FROM sliding_sync_membership_snapshots AS m
+                           INNER JOIN rooms AS r USING (room_id)
+                           LEFT JOIN sliding_sync_joined_rooms AS j
+                                     ON (j.room_id = m.room_id AND m.membership = 'join')
+                  WHERE user_id = ?
                     AND m.forgotten = 0
-                    AND (m.membership != 'leave' OR m.user_id != m.sender)
-            """
+                    AND (m.membership != 'leave' OR m.user_id != m.sender) \
+                  """
             txn.execute(sql, (user_id,))
 
             return {
@@ -1586,6 +1603,7 @@ class RoomMemberWorkerStore(EventsWorkerStore, CacheInvalidationWorkerStore):
         Returns:
             Map from room ID to membership info
         """
+
         # TODO: Potential to check
         # `self._membership_stream_cache.has_entity_changed(...)` as an early-return
         # shortcut.
@@ -1594,20 +1612,24 @@ class RoomMemberWorkerStore(EventsWorkerStore, CacheInvalidationWorkerStore):
             txn: LoggingTransaction,
         ) -> Dict[str, RoomsForUserSlidingSync]:
             sql = """
-                SELECT m.room_id, m.sender, m.membership, m.membership_event_id,
-                    r.room_version,
-                    m.event_instance_name, m.event_stream_ordering,
-                    m.has_known_state,
-                    m.room_type,
-                    m.is_encrypted
-                FROM sliding_sync_membership_snapshots AS m
-                INNER JOIN rooms AS r USING (room_id)
-                WHERE user_id = ?
+                  SELECT m.room_id,
+                         m.sender,
+                         m.membership,
+                         m.membership_event_id,
+                         r.room_version,
+                         m.event_instance_name,
+                         m.event_stream_ordering,
+                         m.has_known_state,
+                         m.room_type,
+                         m.is_encrypted
+                  FROM sliding_sync_membership_snapshots AS m
+                           INNER JOIN rooms AS r USING (room_id)
+                  WHERE user_id = ?
                     AND m.forgotten = 0
                     AND m.membership = 'leave'
                     AND m.user_id = m.sender
-                    AND (m.event_stream_ordering > ?)
-            """
+                    AND (m.event_stream_ordering > ?) \
+                  """
             # If a leave happens after the token range, we may have still been joined
             # (or any non-self-leave which is relevant to sync) to the room before so we
             # need to include it in the list of potentially relevant rooms and apply our
@@ -1670,19 +1692,24 @@ class RoomMemberWorkerStore(EventsWorkerStore, CacheInvalidationWorkerStore):
             txn: LoggingTransaction,
         ) -> Optional[RoomsForUserSlidingSync]:
             sql = """
-                SELECT m.room_id, m.sender, m.membership, m.membership_event_id,
-                    r.room_version,
-                    m.event_instance_name, m.event_stream_ordering,
-                    m.has_known_state,
-                    COALESCE(j.room_type, m.room_type),
-                    COALESCE(j.is_encrypted, m.is_encrypted)
-                FROM sliding_sync_membership_snapshots AS m
-                INNER JOIN rooms AS r USING (room_id)
-                LEFT JOIN sliding_sync_joined_rooms AS j ON (j.room_id = m.room_id AND m.membership = 'join')
-                WHERE user_id = ?
+                  SELECT m.room_id,
+                         m.sender,
+                         m.membership,
+                         m.membership_event_id,
+                         r.room_version,
+                         m.event_instance_name,
+                         m.event_stream_ordering,
+                         m.has_known_state,
+                         COALESCE(j.room_type, m.room_type),
+                         COALESCE(j.is_encrypted, m.is_encrypted)
+                  FROM sliding_sync_membership_snapshots AS m
+                           INNER JOIN rooms AS r USING (room_id)
+                           LEFT JOIN sliding_sync_joined_rooms AS j
+                                     ON (j.room_id = m.room_id AND m.membership = 'join')
+                  WHERE user_id = ?
                     AND m.forgotten = 0
-                    AND m.room_id = ?
-            """
+                    AND m.room_id = ? \
+                  """
             txn.execute(sql, (user_id, room_id))
             row = txn.fetchone()
             if not row:
@@ -1771,14 +1798,14 @@ class RoomMemberWorkerStore(EventsWorkerStore, CacheInvalidationWorkerStore):
             txn: LoggingTransaction, user_id: str, timestamp: int
         ) -> frozenset:
             sql = """
-                SELECT rm.room_id
-                FROM room_memberships AS rm
-                INNER JOIN events AS e USING (event_id)
-                WHERE rm.user_id = ?
+                  SELECT rm.room_id
+                  FROM room_memberships AS rm
+                           INNER JOIN events AS e USING (event_id)
+                  WHERE rm.user_id = ?
                     AND rm.membership = 'join'
                     AND e.type = 'm.room.member'
-                    AND e.received_ts >= ?
-            """
+                    AND e.received_ts >= ? \
+                  """
             txn.execute(sql, (user_id, timestamp))
             return frozenset([r[0] for r in txn])
 
@@ -1802,14 +1829,14 @@ class RoomMemberWorkerStore(EventsWorkerStore, CacheInvalidationWorkerStore):
             txn: LoggingTransaction, user_id: str, room_id: str
         ) -> None:
             sql = """
-                UPDATE room_memberships
-                SET participant = true
-                WHERE event_id IN (
-                    SELECT event_id FROM local_current_membership
-                    WHERE user_id = ? AND room_id = ?
-                )
-                AND NOT participant
-            """
+                  UPDATE room_memberships
+                  SET participant = true
+                  WHERE event_id IN (SELECT event_id
+                                     FROM local_current_membership
+                                     WHERE user_id = ?
+                                       AND room_id = ?)
+                    AND NOT participant \
+                  """
             txn.execute(sql, (user_id, room_id))
 
         await self.db_pool.runInteraction(
@@ -1829,12 +1856,12 @@ class RoomMemberWorkerStore(EventsWorkerStore, CacheInvalidationWorkerStore):
             txn: LoggingTransaction, user_id: str, room_id: str
         ) -> bool:
             sql = """
-                SELECT participant
-                FROM local_current_membership AS l
-                INNER JOIN room_memberships AS r USING (event_id)
-                WHERE l.user_id = ?
-                AND l.room_id = ?
-            """
+                  SELECT participant
+                  FROM local_current_membership AS l
+                           INNER JOIN room_memberships AS r USING (event_id)
+                  WHERE l.user_id = ?
+                    AND l.room_id = ? \
+                  """
             txn.execute(sql, (user_id, room_id))
             res = txn.fetchone()
             if res:
@@ -1844,6 +1871,26 @@ class RoomMemberWorkerStore(EventsWorkerStore, CacheInvalidationWorkerStore):
         return await self.db_pool.runInteraction(
             "_get_room_participation_txn", _get_room_participation_txn, user_id, room_id
         )
+
+    async def get_spaces_where_user_is_subscriber_admin(self, user_id: str) -> Set[str]:
+        """
+        Returns a set of room_ids for spaces where the user is listed as a
+        subscriber admin.
+        """
+        sql = """
+              SELECT room_id \
+              FROM current_state_events
+              WHERE type = 'dev.martynenko.space.subscriber_admins'
+                AND content::jsonb->'users' @> ?::jsonb \
+              """
+        user_id_json_array = f'["{user_id}"]'
+
+        rows = await self.db_pool.execute(
+            "get_spaces_where_user_is_subscriber_admin",
+            sql,
+            user_id_json_array,
+        )
+        return {row[0] for row in rows}
 
 
 class RoomMemberBackgroundUpdateStore(SQLBaseStore):
@@ -1889,14 +1936,14 @@ class RoomMemberBackgroundUpdateStore(SQLBaseStore):
 
         def add_membership_profile_txn(txn: LoggingTransaction) -> int:
             sql = """
-                SELECT stream_ordering, event_id, events.room_id, event_json.json
-                FROM events
-                INNER JOIN event_json USING (event_id)
-                WHERE ? <= stream_ordering AND stream_ordering < ?
-                AND type = 'm.room.member'
-                ORDER BY stream_ordering DESC
-                LIMIT ?
-            """
+                  SELECT stream_ordering, event_id, events.room_id, event_json.json
+                  FROM events
+                           INNER JOIN event_json USING (event_id)
+                  WHERE ? <= stream_ordering
+                    AND stream_ordering < ?
+                    AND type = 'm.room.member'
+                  ORDER BY stream_ordering DESC LIMIT ? \
+                  """
 
             txn.execute(sql, (target_min_stream_id, max_stream_id, batch_size))
 
@@ -1921,9 +1968,12 @@ class RoomMemberBackgroundUpdateStore(SQLBaseStore):
                     to_update.append((display_name, avatar_url, event_id, room_id))
 
             to_update_sql = """
-                UPDATE room_memberships SET display_name = ?, avatar_url = ?
-                WHERE event_id = ? AND room_id = ?
-            """
+                            UPDATE room_memberships
+                            SET display_name = ?,
+                                avatar_url   = ?
+                            WHERE event_id = ?
+                              AND room_id = ? \
+                            """
             txn.execute_batch(to_update_sql, to_update)
 
             progress = {
@@ -1963,7 +2013,9 @@ class RoomMemberBackgroundUpdateStore(SQLBaseStore):
             while processed < batch_size:
                 txn.execute(
                     """
-                        SELECT MIN(room_id) FROM current_state_events WHERE room_id > ?
+                    SELECT MIN(room_id)
+                    FROM current_state_events
+                    WHERE room_id > ?
                     """,
                     (last_processed_room,),
                 )
@@ -1974,13 +2026,12 @@ class RoomMemberBackgroundUpdateStore(SQLBaseStore):
                 (next_room,) = row
 
                 sql = """
-                    UPDATE current_state_events
-                    SET membership = (
-                        SELECT membership FROM room_memberships
-                        WHERE event_id = current_state_events.event_id
-                    )
-                    WHERE room_id = ?
-                """
+                      UPDATE current_state_events
+                      SET membership = (SELECT membership
+                                        FROM room_memberships
+                                        WHERE event_id = current_state_events.event_id)
+                      WHERE room_id = ? \
+                      """
                 txn.execute(sql, (next_room,))
                 processed += txn.rowcount
 
@@ -2055,8 +2106,10 @@ def extract_heroes_from_room_summary(
         r[0] for r in details.get(Membership.INVITE, empty_ms).members if r[0] != me
     ]
     gone_user_ids = [
-        r[0] for r in details.get(Membership.LEAVE, empty_ms).members if r[0] != me
-    ] + [r[0] for r in details.get(Membership.BAN, empty_ms).members if r[0] != me]
+                        r[0] for r in details.get(Membership.LEAVE, empty_ms).members if
+                        r[0] != me
+                    ] + [r[0] for r in details.get(Membership.BAN, empty_ms).members if
+                         r[0] != me]
 
     # We expect `MemberSummary.members` to already be sorted by `stream_ordering`
     if joined_user_ids or invited_user_ids:
